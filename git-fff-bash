@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+while getopts ':r' opt ; do
+  case "${opt}" in
+    r) rebase=true ;;
+  esac
+done
+shift $((OPTIND-1))
+
+head_branch="$(git symbolic-ref -q --short HEAD)"
+
+set -e
+
+target_branch="${1:-${head_branch}}"
+if [[ -z "${target_branch}" ]] ; then
+  echo 'No branch specified, and no branch checked out'
+  exit 1
+fi
+
+upstream_remote="$(git config --get branch.${target_branch}.remote)"
+upstream_branch="$(git config --get branch.${target_branch}.merge)"
+
+if [[ "${target_branch}" == "${head_branch}" ]] ; then
+  git pull --ff-only "${upstream_remote}" "${upstream_branch}:${target_branch}"
+elif [[ -n "${rebase}" ]] ; then
+  git pull --rebase "${upstream_remote}" "${upstream_branch}:${target_branch}"
+else
+  git fetch "${upstream_remote}" "${upstream_branch}:${target_branch}"
+fi

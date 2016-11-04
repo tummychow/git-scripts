@@ -1,0 +1,74 @@
+#!/usr/bin/env ruby
+
+# get current branch (may fail if HEAD is not a branch)
+#   git symbolic-ref -q --short HEAD
+#   master
+#
+# set target branch to first argument, or current branch if none was passed
+#
+# get this branch's pull upstream (see also git-parse-remote)
+#   git config --get branch.$branch.remote
+#   origin
+#   git config --get branch.$branch.merge
+#   refs/heads/master
+# (note that the refs/heads/ part on the remote branch is legal in a refspec)
+#
+# execute the update via pull if the current branch matches the target branch
+#   git pull --ff-only <remote> <remoteref>:<localref>
+# or via pull --rebase if it was requested
+#   git pull --rebase <remote> <remoteref>:<localref>
+# or via fetch otherwise
+#   git fetch <remote> <remoteref>:<localref>
+
+require 'open3'
+require 'shellwords'
+require 'optparse'
+
+should_rebase = false
+OptionParser.new do |opts|
+  opts.on('-r', '--rebase') do |v|
+    should_rebase = true
+  end
+end.parse!
+
+get_head = %W[git symbolic-ref -q --short HEAD]
+o, s = Open3.capture2(*get_head)
+HEAD_BRANCH = o.chomp
+
+TARGET_BRANCH = ARGV.shift || HEAD_BRANCH
+abort('No branch specified, and no branch checked out') if TARGET_BRANCH.empty?
+
+get_upstream_merge = %W[git config --get branch.#{TARGET_BRANCH}.merge]
+o, s = Open3.capture2(*get_upstream_merge)
+abort("#{get_upstream_merge.shelljoin} got #{s.exitstatus}") unless s.exitstatus == 0
+abort("#{o.chomp} does not look like a branch name") unless o.start_with?('refs/heads/')
+UPSTREAM_BRANCH = o.chomp
+
+get_upstream_pull = %W[git config --get branch.#{TARGET_BRANCH}.remote]
+o, s = Open3.capture2(*get_upstream_pull)
+abort("#{get_upstream_pull.shelljoin} got #{s.exitstatus}") unless s.exitstatus == 0
+UPSTREAM_REMOTE = o.chomp
+
+if TARGET_BRANCH == HEAD_BRANCH
+  # fetch will refuse to update the checked out branch unless --update-head-ok
+  # is passed, and even if you pass that flag, it won't actually update the
+  # working tree after fast-forwarding
+  # pull implements that behavior correctly, so if we are on the target branch,
+  # we must use that instead
+  # https://github.com/git/git/blob/master/builtin/pull.c#L893
+  # pull will attempt to merge FETCH_HEAD after completing the fetch, which is
+  # why it prints 'Already up-to-date'
+  fff = %W[git pull --ff-only #{UPSTREAM_REMOTE} #{UPSTREAM_BRANCH}:#{TARGET_BRANCH}]
+elsif should_rebase
+  # this case is useful if the user wants to update a branch, and then rebase
+  # their current branch over it in the same command
+  # TODO: allow passing =preserve, =interactive or --autostash to this command
+  fff = %W[git pull --rebase #{UPSTREAM_REMOTE} #{UPSTREAM_BRANCH}:#{TARGET_BRANCH}]
+else
+  # if we are not on the target branch, however, then using pull will attempt
+  # to merge the target branch into the current HEAD
+  # instead we use fetch to skip the merge altogether
+  fff = %W[git fetch #{UPSTREAM_REMOTE} #{UPSTREAM_BRANCH}:#{TARGET_BRANCH}]
+end
+puts fff.shelljoin
+exec(*fff)

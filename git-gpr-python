@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+
+# usage:
+#   git gpr
+# will open the github pr for the current branch in your browser, or the form
+# to create a new pr if none exists
+# the source of the pr (CANDIDATE) is the default remote and branch chosen by
+# git-push, when it is invoked without arguments
+# the destination of the pr (TARGET) is, from most to least preferred:
+# - the default pull remote and branch for the current branch, if different
+#   from the candidate (if the branch is ambiguous or undefined, use the pull
+#   remote's default branch)
+# - the default branch for the parent repo of the candidate, if the candidate
+#   is a github fork
+# - the default branch for the candidate repo
+# here we define "default branch" as the remote's default, or the github repo's
+# default otherwise
+
+import subprocess
+import urllib.parse
+import urllib.request
+import json
+import codecs
+UTF8Reader = codecs.getreader('utf-8')
+
+
+def deprefix(val, prefix, check=False):
+    if val.startswith(prefix):
+        return val[len(prefix):]
+    elif check:
+        raise RuntimeError('{!r} does not start with {!r}'.format(val, prefix))
+    return val
+
+
+def desuffix(val, suffix, check=False):
+    if val.endswith(suffix):
+        return val[:-len(suffix)]
+    elif check:
+        raise RuntimeError('{!r} does not end with {!r}'.format(val, suffix))
+    return val
+
+
+def invoke(*cmd):
+    return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, universal_newlines=True).stdout
+
+
+def git_config_get(*names, default=None, get_all=False):
+    action = '--get'
+    if get_all:
+        action = '--get-all'
+        if default is None:
+            default = []
+
+    for variable in names:
+        try:
+            ret = invoke('git', 'config', action, '--null', variable).split('\0')[:-1]
+            if not get_all:
+                [ret] = ret
+            return ret
+        except subprocess.CalledProcessError as e:
+            if e.returncode != 1:
+                raise
+    if default is None:
+        raise RuntimeError('git config did not contain any of {!r}'.format(names))
+    return default
+
+
+def github_from_remote_url(remote_url):
+    # the format of these urls is defined in git-fetch
+    # it can be either an https url, an ssh url, or an scp-style string
+    [before_colon, after_colon] = remote_url.split(':', maxsplit=1)
+    if after_colon.startswith('//'):
+        # url case
+        parsed_url = urllib.parse.urlparse(remote_url)
+        # TODO: the user could have other hosts here:
+        #       - a resolved ip
+        #       - a proxy host
+        #       - a cname or alias from their /etc/hosts
+        #       - a host from their ssh config
+        if parsed_url.hostname != 'github.com':
+            raise RuntimeError('{!r} does not point to github.com'.format(remote_url))
+        # TODO: the user might have a different username here, or no username
+        # at all (eg from their ssh config)
+        if parsed_url.scheme != 'https' and (parsed_url.scheme != 'ssh' or parsed_url.user != 'git'):
+            raise RuntimeError('{!r} does not use https, or ssh as git'.format(remote_url))
+        # TODO: the user could specify a port explicitly
+        if not parsed_url.path.startswith('/'):
+            raise RuntimeError('{!r} path was parsed incorrectly to {}'.format(remote_url, parsed_url.path))
+        owner_slash_repo = parsed_url.path[1:]
+    else:
+        # scp case
+        # TODO: similar to above, this might not be the same user or hostname
+        if before_colon != 'git@github.com':
+            raise RuntimeError('{!r} uses scp style syntax, but does not point to git@github.com'.format(remote_url))
+        owner_slash_repo = after_colon
+
+    [owner, repo] = desuffix(owner_slash_repo, '.git').split('/')
+    return owner, repo
+
+
+def https_get_json(host, path='', params={}, headers={}):
+    with urllib.request.urlopen(urllib.request.Request(
+        urllib.parse.urlunparse(('https', host, path, '', urllib.parse.urlencode(params), '')),
+        method='GET',
+        headers=headers,
+    )) as resp:
+        return json.load(UTF8Reader(resp))
+
+
+def get_remote_or_github_default(remote_name, headers, owner_repo=None, default=None):
+    try:
+        # try to resolve the remote's HEAD first
+        # see also git-remote set-head
+        remote_head = invoke('git', 'symbolic-ref', '--short', 'refs/remotes/{}/HEAD'.format(remote_name)).strip()
+        [found_remote, default_branch] = remote_head.split('/', maxsplit=1)
+        if found_remote != remote_name:
+            # TODO: is it ever possible for a remote's HEAD to not point to a
+            # ref of that remote itself? is this check necessary?
+            raise RuntimeError('remote {} has default branch {}, which does not belong to that remote'.format(remote_name, default_branch))
+        return default_branch
+    except subprocess.CalledProcessError as e:
+        if default is not None:
+            return default
+        # we could compute this ourselves, but we don't know if the caller
+        # wants the fetch or push url
+        remote_owner, remote_repo = owner_repo
+        repo_data = https_get_json(
+            'api.github.com',
+            '/repos/{}/{}'.format(remote_owner, remote_repo),
+            headers=headers,
+        )
+        return repo_data['default_branch']
+
+
+# step 1: determine HEAD using git-symbolic-ref
+# if HEAD is not on a branch, then it will not be a symbolic ref at all, so
+# this will fail
+# since HEAD is always a branch, we can use --short to skip the 'refs/heads/'
+# prefix
+HEAD = invoke('git', 'symbolic-ref', '--short', 'HEAD').strip()
+
+# step 2a: determine the candidate remote (the remote that git-push uses when
+# no arguments are passed)
+# this comes from one of these three config variables, in order of precedence
+# it could be '.' (the local repo) but that will fail later
+CANDIDATE_REMOTE = git_config_get(
+    'branch.{}.pushRemote'.format(HEAD),
+    'remote.pushDefault',
+    # TODO: does the default of 'origin' apply here, or does git-push fail if
+    # they are all unset?
+    'branch.{}.remote'.format(HEAD),
+)
+
+# step 2b: get the push url for the candidate remote, and parse out the github
+# owner/repo from it
+CANDIDATE_URL = invoke('git', 'remote', 'get-url', '--push', CANDIDATE_REMOTE).strip()
+CANDIDATE_OWNER, CANDIDATE_REPO = github_from_remote_url(CANDIDATE_URL)
+
+# step 3a: get github api credentials
+# TODO: we should still try if these are absent (eg if the user is on a public
+# repo and doesn't need credentials)
+# TODO: are there other places the user might define credentials from? eg netrc
+# or hub config?
+GITHUB_OAUTH_TOKEN = git_config_get('github.oauth')
+GITHUB_HEADERS = {
+    'Accept': 'application/vnd.github.v3+json',
+    'Authorization': 'token {}'.format(GITHUB_OAUTH_TOKEN)
+}
+
+# step 3b: get pull remote and branch(es) (needed later)
+# TODO: avoid asking for 'branch.{}.remote' twice (we might have already asked
+# for it earlier as part of the candidate remote)
+PULL_REMOTE = git_config_get('branch.{}.remote'.format(HEAD), default='origin')
+# there could be multiple branches here, which specifies an octopus merge after
+# pulling
+# it could also be unset, in which case the merge will use the first fetched
+# branch
+PULL_BRANCHES = [deprefix(branch, 'refs/heads/', check=True) for branch in git_config_get('branch.{}.merge'.format(HEAD), get_all=True)]
+
+# step 4a: check for a list of push refspecs associated with this remote, and
+# if there are any, try to find one whose source matches HEAD; its destination
+# can be used as the candidate branch
+push_specs = git_config_get('remote.{}.push'.format(CANDIDATE_REMOTE), get_all=True)
+if len(push_specs) != 0:
+    symbolic_head = 'refs/heads/' + HEAD
+    for push_refspec in push_specs:
+        # TODO: are there forms here that don't include colons? eg 'tag <tag>'?
+        [src, dst] = push_refspec.split(':')
+        # the '+' indicates a refspec that should be forced, this is not used
+        # in the matching process
+        src = deprefix(src, '+')
+        # a refspec of ':' will push all matching branches
+        if src == '' and dst == '':
+            CANDIDATE_BRANCH = HEAD
+            break
+        elif '*' in src:
+            # the refspec source could contain a single '*', which matches any
+            # number of characters
+            # see also git-check-ref-format --refspec-pattern
+            [src_prefix, src_suffix] = src.split('*')
+            # TODO: how does the 'refs/<>/' prefix get involved here? we try
+            # with 'refs/heads/' and without it, is that sufficient?
+            if HEAD.startswith(src_prefix) and HEAD.endswith(src_suffix):
+                head_middle = HEAD[len(src_prefix):-len(src_suffix)]
+            elif symbolic_head.startswith(src_prefix) and symbolic_head.endswith(src_suffix):
+                head_middle = symbolic_head[len(src_prefix):-len(src_suffix)]
+            else:
+                continue
+            # the destination should also be a pattern, and its '*' is replaced
+            # with the matched characters from the source
+            [dst_prefix, dst_suffix] = dst.split('*')
+            CANDIDATE_BRANCH = dst_prefix + head_middle + dst_suffix
+            break
+        else:
+            # or the refspec source could be a literal ref name, in which case
+            # we use --symbolic-full-name to disambiguate it (in case it does
+            # not have a 'refs/<>/' prefix on it) and then match it against
+            # HEAD
+            # TODO: is the source ref allowed to be nonexistent? if so, should
+            # we just continue when this fails?
+            symbolic_src = invoke('git', 'rev-parse', '--symbolic-full-name', src).strip()
+            if symbolic_head == symbolic_src:
+                CANDIDATE_BRANCH = dst
+                break
+    else:
+        # TODO: should we fall through to push.default here? does git do that?
+        raise RuntimeError('remote.{}.push is defined, but none of {!r} match {}'.format(CANDIDATE_REMOTE, push_specs, HEAD))
+    if CANDIDATE_BRANCH.startswith('refs/'):
+        # TODO: besides 'refs/heads/<name>' and <name>, what other forms could
+        # be valid here?
+        # TODO: is 'refs/remotes/<name>/<foo>' allowed here? that actually
+        # seems to push our branch, to one of the remote's remote refs
+        # TODO: what if dst is actually a tag? (unlikely since tags cannot be
+        # updated by branches without '+', but 'refs/tags/' has higher priority
+        # than 'refs/heads/')
+        CANDIDATE_BRANCH = deprefix(CANDIDATE_BRANCH, 'refs/heads/', check=True)
+# step 4b: if there are no push refspecs, we use the behavior of push.default
+# to determine the candidate branch
+else:
+    push_default = git_config_get('push.default', default='simple')
+    # matching, current or simple (decentralized): push to branch of same name
+    if push_default == 'matching' or push_default == 'current' or (push_default == 'simple' and CANDIDATE_REMOTE != PULL_REMOTE):
+        CANDIDATE_BRANCH = HEAD
+    # upstream or simple (centralized): push to same branch as pull (must be
+    # exactly one)
+    elif push_default == 'upstream' or (push_default == 'simple' and CANDIDATE_REMOTE == PULL_REMOTE):
+        [CANDIDATE_BRANCH] = PULL_BRANCHES
+    # nothing: we wouldn't be allowed to push with no arguments, fail
+    elif push_default == 'nothing':
+        raise RuntimeError('push.default is nothing, cannot determine candidate')
+    else:
+        raise RuntimeError('push.default has unrecognized value {}'.format(push_default))
+
+# step 5a: if git-pull with no arguments uses a non-candidate branch, then use
+# that as the target
+# note: the candidate remote might have different push/fetch urls, but we don't
+# treat those as different, because git expects that pushing to the push url
+# will also update the fetch url, ie the urls should be semantically equivalent
+if PULL_REMOTE != CANDIDATE_REMOTE or CANDIDATE_BRANCH not in PULL_BRANCHES:
+    # get the fetch url of the remote, in case it's different from the push url
+    PULL_URL = invoke('git', 'remote', 'get-url', PULL_REMOTE).strip()
+    TARGET_OWNER, TARGET_REPO = github_from_remote_url(PULL_URL)
+    if len(PULL_BRANCHES) == 1:
+        [TARGET_BRANCH] = PULL_BRANCHES
+    else:
+        TARGET_BRANCH = get_remote_or_github_default(PULL_REMOTE, headers=GITHUB_HEADERS, owner_repo=(TARGET_OWNER, TARGET_REPO))
+# step 5b: if git-pull and git-push without arguments go to the same place,
+# then we'll use either the candidate remote's parent (if it is a github fork)
+# or the candidate remote itself (if not) as the target
+else:
+    repo_data = https_get_json(
+        'api.github.com',
+        '/repos/{}/{}'.format(CANDIDATE_OWNER, CANDIDATE_REPO),
+        headers=GITHUB_HEADERS
+    )
+    if repo_data['fork']:
+        repo_data = repo_data['parent']
+        # TODO: find a matching remote for the fork, and try to get its default
+        TARGET_BRANCH = get_remote_or_github_default('ENOENT', headers=GITHUB_HEADERS, default=repo_data['default_branch'])
+    else:
+        TARGET_BRANCH = get_remote_or_github_default(CANDIDATE_REMOTE, headers=GITHUB_HEADERS, default=repo_data['default_branch'])
+
+    TARGET_OWNER = repo_data['owner']['login']
+    TARGET_REPO = repo_data['name']
+
+# step 6a: abort if the candidate and target are the same
+if TARGET_OWNER == CANDIDATE_OWNER and TARGET_REPO == CANDIDATE_REPO and TARGET_BRANCH == CANDIDATE_BRANCH:
+    raise RuntimeError('target and candidate are identical ({}/{} {})'.format(TARGET_OWNER, TARGET_REPO, TARGET_BRANCH))
+
+# step 6b: try to find existing pull requests for this candidate/target combo,
+# if any
+pulls_body = https_get_json(
+    'api.github.com',
+    '/repos/{}/{}/pulls'.format(TARGET_OWNER, TARGET_REPO),
+    params={
+        'base': TARGET_BRANCH,
+        'head': '{}:{}'.format(CANDIDATE_OWNER, CANDIDATE_BRANCH)
+    },
+    headers=GITHUB_HEADERS
+)
+existing_pulls = [pull['html_url'] for pull in pulls_body]
+
+# step 6c: open the desired url in the browser
+if len(existing_pulls) == 0:
+    # note: CANDIDATE_OWNER can be omitted if equal to TARGET_OWNER, but you
+    # are allowed to include it in the url without consequences
+    PR_URL = 'https://github.com/{}/{}/compare/{}...{}:{}?expand=1'.format(
+        TARGET_OWNER,
+        TARGET_REPO,
+        TARGET_BRANCH,
+        CANDIDATE_OWNER,
+        CANDIDATE_BRANCH,
+    )
+elif len(existing_pulls) == 1:
+    [PR_URL] = existing_pulls
+else:
+    raise RuntimeError('got multiple possible pull requests {!r}'.format(existing_pulls))
+# TODO: support xdg-open
+invoke('open', PR_URL)
