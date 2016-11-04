@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+
+import subprocess
+import itertools
+
+
+def deprefix(val, prefix, check=False):
+    if val.startswith(prefix):
+        return val[len(prefix):]
+    elif check:
+        raise RuntimeError('{!r} does not start with {!r}'.format(val, prefix))
+    return val
+
+
+def desuffix(val, suffix, check=False):
+    if val.endswith(suffix):
+        return val[:-len(suffix)]
+    elif check:
+        raise RuntimeError('{!r} does not end with {!r}'.format(val, suffix))
+    return val
+
+
+def invoke(*cmd):
+    return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, universal_newlines=True).stdout
+
+
+def git_config_get(*names, default=None, get_all=False):
+    action = '--get'
+    if get_all:
+        action = '--get-all'
+        if default is None:
+            default = []
+
+    for variable in names:
+        try:
+            ret = invoke('git', 'config', action, '--null', variable).split('\0')[:-1]
+            if not get_all:
+                [ret] = ret
+            return ret
+        except subprocess.CalledProcessError as e:
+            if e.returncode != 1:
+                raise
+    if default is None:
+        raise RuntimeError('git config did not contain any of {!r}'.format(names))
+    return default
+
+
+def parse_commit_log_line(log_line):
+    [sha, parent_shas, author_email] = log_line.split('\0')
+    return {'commit': sha, 'parents': parent_shas.split(' '), 'author': author_email}
+
+
+# TODO: parse these from args
+USER_BASE = None # user-specified custom base for commit stack
+MAX_STACK = 5 # user-configurable maximum commit stack depth
+FORCE = False # skip some safety checks
+
+# TODO: check if our default push target is equal to the default push remote's
+# default branch, if so bail unless forced
+# TODO: check for merge conflicts, if so bail unless forced
+
+# step 1: determine HEAD using git-symbolic-ref
+# if HEAD is not on a branch, then it will not be a symbolic ref at all, so
+# this will fail
+# since HEAD is always a branch, we can use --short to skip the 'refs/heads/'
+# prefix
+HEAD = invoke('git', 'symbolic-ref', '--short', 'HEAD').strip()
+
+# step 2a: determine what commits to exclude from the stack
+# if the user specified a base commit, then just exclude that using the ^
+if USER_BASE is not None:
+    exclude_revs = ['^{}'.format(USER_BASE)]
+# otherwise, we want to find only the commits that are exclusive to our branch,
+# as if we had negated every other branch in the repo
+# to do this, we match all branches using --branches, except our own, which we
+# skip using --exclude
+# we negate this entire thing using --not, so all ancestors of other branches
+# will be excluded
+# finally we need another --not to terminate the previous one
+else:
+    exclude_revs = ['--not', '--exclude={}'.format(HEAD), '--branches', '--not']
+
+# step 2b: list all commits from HEAD backwards, with exclusions
+# we use log here because rev-list does not play well with --format, and we
+# need the custom format to get information like author emails
+commit_stack = invoke(
+    'git', 'log',
+    *exclude_revs,
+    'refs/heads/{}'.format(HEAD),
+    # we use --topo-order because topological order is what matters
+    '--topo-order',
+    # we use --full-history and --sparse to turn off all parent rewriting and
+    # history simplification, because we need to see merges
+    '--full-history',
+    '--sparse',
+    # our format specifies the commit sha, its parent shas, and the author's
+    # email (with .mailmap normalization), with null separators and a trailing
+    # null
+    '--format=tformat:%H%x00%P%x00%aE%x00'
+).split('\0\n')[:-1]
+# parse all the commit lines in our log
+commit_stack = list(map(parse_commit_log_line, commit_stack))
+
+# step 2c: do not accept the stack if it contains commits authored by other
+# people, unless the user specified their own base
+# determining the author is complex, it involves parsing git identity strings
+# (the reference implementation is split_ident_line) and passing them through
+# .mailmap (a file used for identity normalization)
+if USER_BASE is None and not FORCE:
+    # first retrieve the current user's email, discarding characters that would
+    # be used as delimiters in an ident string (and are therefore illegal)
+    author_email = git_config_get('user.email').replace('<', '').replace('>', '').replace('\n', '')
+    # wrap the email in angle brackets to make it an ident string, and then
+    # normalize the identity with check-mailmap
+    author_email = invoke('git', 'check-mailmap', '<{}>'.format(author_email)).strip()
+    # check-mailmap returns an identity string, we want to parse the email out
+    # of it
+    # the email is considered to span from the first opening angle bracket, to
+    # the first closing angle bracket after that opening bracket
+    first_angle_bracket = author_email.index('<')
+    author_email = author_email[first_angle_bracket+1:author_email.index('>', first_angle_bracket)]
+    # now find the other authors and bail if there are any
+    other_authors = set(map(lambda commit: commit['author'], commit_stack))
+    # our email might not even be in the set, so we can't just remove() it
+    other_authors.difference_update(author_email)
+    if len(other_authors) != 0:
+        raise RuntimeError('stack contains commits from foreign authors {!r}, expected only {!r}'.format(other_authors, author_email))
+
+# step 2d: merges cannot be safely fixed up, so all merges and their ancestors
+# must be removed from the stack
+# merges can be identified as any commit with 2 or more parents (note that the
+# stack may include a root commit, so 0 parents is acceptable)
+commit_stack = list(itertools.takewhile(lambda commit: len(commit['parents']) <= 1, commit_stack))
+
+# step 2e: limit the maximum height of the stack
+if len(commit_stack) > MAX_STACK and not FORCE:
+    commit_stack = commit_stack[:MAX_STACK]
+
+print(repr(commit_stack))
