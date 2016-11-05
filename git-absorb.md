@@ -61,9 +61,7 @@ we are in a git repository. we are on a branch and we have uncommitted changes i
 
 # step 1: eligible commits
 
-we have to first determine what commits we're allowed to fix up. to avoid the chaos of shuffling through merges, we want a strictly linear sequence. furthermore, we don't want to be fixupping into commits that belong to other branches, since we might interfere with public history. we will refer to this set of commits as the **eligible stack**.
-
-we start, as always, by finding the current branch:
+we have to first determine what commits we're allowed to fix up. to avoid the chaos of shuffling through merges, we want a strictly linear sequence. furthermore, we don't want to be fixupping into commits that belong to other branches, since we might interfere with public history. we start, as always, by finding the current branch:
 
 ```python
 HEAD = invoke('git', 'symbolic-ref', '--short', 'HEAD').strip()
@@ -231,6 +229,38 @@ commit_stack = list(itertools.takewhile(lambda commit: len(commit['parents']) <=
 if len(commit_stack) > MAX_STACK and not FORCE:
     commit_stack = commit_stack[:MAX_STACK]
 ```
+
+# interlude: patch theory
+
+let's talk, for a second, about what absorb is actually trying to do.
+
+we have a linear sequence of commits, and we have the git index. we refer to the sequence as **the stack**: the top commit in the stack is the newest one, and the bottom commit is the oldest. the parent of the bottom commit is immutable (in most cases it'll be either a merge, or a commit that is shared with another branch). all other commits in the stack are eligible for mutation. the goal of absorb is to integrate the index into the stack by mutating the commits there. what is meant by "integrate"?
+
+intuitively we have some idea: if a commit in the stack modified some lines, and then a hunk in the index also modified those lines, we want to integrate the latter into the former. we can formalize this concept using patch theory. the best extant implementations of patch theory are darcs and pijul; both are version control systems based on the concept. the fundamental principle of patch theory is that patches can **commute**. if i have a repository with two patches in it, and the final state of the repo is the same regardless of which patch i apply first, we say that those patches commute with each other, ie i can swap their ordering arbitrarily. in an ideal world, a repository consists entirely of patches that are all pairwise commutative with each other. there's no point ordering the patches because it doesn't matter. all orderings would have the same result.
+
+however, not all patches commute in real life. if patch A creates a file and patch B modifies that file, then B must come after A, or otherwise B would modify a file that does not exist, which is unsound. we say that B **depends** on A; it must come after. we can represent our repository as an unconnected, directed, acyclic graph of patches. unconnected nodes can be arbitrarily reordered with respect to one another, but connected nodes are constrained by a happens-before relationship; a node cannot be reordered before another node that it is connected to (depends on).
+
+in many cases, the dependency relationship between noncommutative nodes can be determined automatically, because only one possible ordering is valid. if only one patch exists to create a file, then all patches that modify that file must depend on it. but what if there were multiple patches that created that file? which modifying patches would depend on which creating patches? when a group of patches do not commute and there are multiple valid dependency resolutions between them, we get a **conflict**. some ordering must be enforced between these patches, because they don't commute, but multiple valid orderings are available, so the choice is ambiguous. at this point a human has to step in and resolve the conflict.
+
+there are a variety of ways to represent conflict resolution within a patch theory system. fortunately we don't have to deal with any of those. by definition, our repository does not contain any conflicts. there already exists at least one valid patch ordering: all the commits in the stack, in order, and then the index on top. are there any other valid, equivalent orderings? asking that question reveals the purpose of absorb, which is: to find out.
+
+we break the index patch into as many pairwise commutative patches as possible - to be specific, we break it into hunks. (hunks are the smallest unit of a patch that can still be commuted, because they are separated by at least one unchanged line, which disambiguates which one is above the other in the file. if two hunks were adjacent, then either one could go above the other, so they would conflict. likewise, if two hunks overlapped, they could be interleaved in a variety of ways, so they would conflict.) since the hunks are pairwise commutative, we can describe the absorb algorithm in terms of an individual hunk, and simply repeat it for all the hunks in the set.
+
+we wish to find another patch that this hunk depends on, and merge the hunk into that patch. (i use the term "merge" loosely here - a merge is not really necessary since, by definition, dependent patches can be combined into one without conflicts.) to do this, we check if the hunk commutes with the top of the stack. if it cannot, then it must depend on that commit (since they don't commute with each other, and we know that the hunk comes after), so the algorithm is done. otherwise, we pop that commit off the stack and compare to the next one down. we keep doing this until either we find a commit that does not commute, or we exhaust the stack. if we exhaust the stack, then this hunk does not depend on any of the commits in the stack. 
+
+after absorbing a single hunk, we reset the stack back to its original state and continue with the next hunk. once we have gone through all the hunks in the index, we are left with the final state of the absorb algorithm. some hunks are flagged as being dependent on various commits in the stack; absorb will rewrite history to concatenate those hunks into their dependent commits. other hunks could not find a dependent, and will be left untouched in the index.
+
+the commutation rules of patches are the key to implementing this system, and they are quite complex. broadly speaking, we have diffs (from/to text, from/to binary, and any combination thereof), adds and deletes (creating or removing files), and various metadata changes (file mode, symlink-ness, etc). we have to define which types of patch we are interested in and how they can be combined:
+
+- we completely ignore all diff types except text-to-text. files that are binary in the index (with possible text-to-binary or binary-to-binary diffs in the stack) are ignored. if the stack contains a binary-to-text diff, text-to-text diffs are considered to be noncommutative with it.
+- we ignore adds, renames and deletes in the index, because they commute too widely with other commits. broadly speaking, it doesn't make sense to absorb a deletion, since the only patch it could be absorbed into would be the last patch to change that file, and if we assume the stack consists of atomic commits, then why would we modify a file and then immediately delete it? same logic goes for adding or renaming a file.
+- we ignore all metadata changes. symlinks are metadata only, so absorb treats them the same way it treats binary files. metadata changes to text are ignored by absorb, as if they were no-op patches, and are therefore commutable with text diffs.
+- if we find a file being added or renamed in the stack, we imagine that patch as being decomposed into two logical parts: a pure addition/rename (adding a completely empty file, or moving one without any changes), and then a diff (adding lines to the new empty file, or modifying the file after the rename). pure renames are considered commutable with diffs; obviously additions are not.
+- absorb does not require copy detection. in fact, copy detection would be detrimental to its function. suppose file A is copied to file B. file A then receives patch X and file B receives patch Y. since B is a copy of A, should Y be absorbed back into A prior to the copy? and then, if we do that, what happens if X and Y do not commute? this is an interesting question in its own right, but absorb punts on the issue by saying patches on B (eg Y) cannot be commuted through the copy back into A. B is treated as an entirely new file and, as mentioned above, diffs cannot commute with new file additions.
+- deletions in the stack are also, by definition, ignored. if a file was deleted in the stack and no later commit re-added it, then our current patch of that file must be an addition, which, as mentioned, will be ignored. otherwise, another commit must have added it back in, so if we have a patch in the index that modifies it, by definition that patch cannot commute with the addition, and therefore must stop before it would reach the deletion.
+- finally, text-to-text diffs commute if they are separated by at least one unchanged line (remember to adjust line offsets as required). obviously diffs cannot be commuted if they overlap. if they are adjacent, then their order is ambiguous (either one could appear above the other in the file), so they cannot be commuted either.
+
+consolidating these rules, we find that absorb is only interested in the text-to-text diffs in the index. out of the various patch types that could appear in the stack, these can commute with: text-to-text diffs (as long as there is at least one unchanged line separating the modified regions of the two diffs), pure metadata changes, and pure renames. this gives us a formal motivation for the structure of absorb as a whole.
 
 # step 2: identify affected paths
 
