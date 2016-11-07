@@ -299,3 +299,9 @@ or if we actually wanted the entire patch, we could do this. we have to be caref
 ```python
 invoke('git', 'diff-index', '--cached', HEAD, '--diff-filter=M', '--unified=0', '--no-color', '--diff-algorithm=default', '--word-diff=none', '--no-renames', '--full-index', '--binary', '--no-ext-diff', '--no-textconv')
 ```
+
+# TODO
+
+- should the stack also exclude remote refs (excepting the push upstream of the current branch)? this would protect against cases where eg you fetch master and rebase onto it, but don't update your local master
+- if file A is copied to file B, does a patch on file A commute backwards past the copy? even though A itself was not modified by the copy, we could argue that later patches to A cannot commute with the copy since they would have affected the copy. in this case we would have to perform copy resolution
+- symbolic refs for locking to protect against multiple git absorbs being run at once
