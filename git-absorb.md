@@ -220,7 +220,7 @@ if USER_BASE is None and not FORCE:
     first_angle_bracket = author_email.index('<')
     author_email = author_email[first_angle_bracket+1:author_email.index('>', first_angle_bracket)]
     other_authors = set(map(lambda commit: commit['author'], commit_stack))
-    other_authors.difference_update(author_email)
+    other_authors.difference_update([author_email])
     if len(other_authors) != 0:
         raise RuntimeError('stack contains commits from foreign authors {!r}, expected only {!r}'.format(other_authors, author_email))
 
