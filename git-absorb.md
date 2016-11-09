@@ -246,7 +246,7 @@ there are a variety of ways to represent conflict resolution within a patch theo
 
 we break the index patch into as many pairwise commutative patches as possible - to be specific, we break it into hunks. (hunks are the smallest unit of a patch that can still be commuted, because they are separated by at least one unchanged line, which disambiguates which one is above the other in the file. if two hunks were adjacent, then either one could go above the other, so they would conflict. likewise, if two hunks overlapped, they could be interleaved in a variety of ways, so they would conflict.) since the hunks are pairwise commutative, we can describe the absorb algorithm in terms of an individual hunk, and simply repeat it for all the hunks in the set.
 
-we wish to find another patch that this hunk depends on, and merge the hunk into that patch. (i use the term "merge" loosely here - a merge is not really necessary since, by definition, dependent patches can be combined into one without conflicts.) to do this, we check if the hunk commutes with the top of the stack. if it cannot, then it must depend on that commit (since they don't commute with each other, and we know that the hunk comes after), so the algorithm is done. otherwise, we pop that commit off the stack and compare to the next one down. we keep doing this until either we find a commit that does not commute, or we exhaust the stack. if we exhaust the stack, then this hunk does not depend on any of the commits in the stack. 
+we wish to find another patch that this hunk depends on, and merge the hunk into that patch. (i use the term "merge" loosely here - a merge is not really necessary since, by definition, dependent patches can be combined into one without conflicts.) to do this, we check if the hunk commutes with the top of the stack. if it cannot, then it must depend on that commit (since they don't commute with each other, and we know that the hunk comes after), so the algorithm is done. otherwise, we pop that commit off the stack and compare to the next one down. we keep doing this until either we find a commit that does not commute, or we exhaust the stack. if we exhaust the stack, then this hunk does not depend on any of the commits in the stack.
 
 after absorbing a single hunk, we reset the stack back to its original state and continue with the next hunk. once we have gone through all the hunks in the index, we are left with the final state of the absorb algorithm. some hunks are flagged as being dependent on various commits in the stack; absorb will rewrite history to concatenate those hunks into their dependent commits. other hunks could not find a dependent, and will be left untouched in the index.
 
@@ -300,8 +300,16 @@ or if we actually wanted the entire patch, we could do this. we have to be caref
 invoke('git', 'diff-index', '--cached', HEAD, '--diff-filter=M', '--unified=0', '--no-color', '--diff-algorithm=default', '--word-diff=none', '--no-renames', '--full-index', '--binary', '--no-ext-diff', '--no-textconv')
 ```
 
+to get the patches for the stack, we could do this:
+
+```python
+# TODO: copy detection? rename detection? should we display anything else in the format? should we use minimal diff?
+invoke('git', 'log', '{}^..{}'.format(commit_stack[-1]['commit'], commit_stack[0]['commit']), '--format=tformat:%H', '--unified=0', '--no-color', '--diff-algorithm=default', '--word-diff=none', '--no-renames', '--full-index', '--binary', '--no-ext-diff', '--no-textconv')
+```
+
 # TODO
 
 - should the stack also exclude remote refs (excepting the push upstream of the current branch)? this would protect against cases where eg you fetch master and rebase onto it, but don't update your local master
 - if file A is copied to file B, does a patch on file A commute backwards past the copy? even though A itself was not modified by the copy, we could argue that later patches to A cannot commute with the copy since they would have affected the copy. in this case we would have to perform copy resolution
 - symbolic refs for locking to protect against multiple git absorbs being run at once
+- to create a partial commit, we would need to patch a tempfile, git-hash-object -w to create a blob for that file, git-mktree to incorporate the blob into a tree object, git-commit-tree to wrap the tree into a commit object, git-update-ref to update a branch with that commit object and reflog it as appropriate
