@@ -366,4 +366,56 @@ one important note in linus's comment is that, for creation and deletion patches
 (' a/ ',)
 ```
 
-but i bet you could construct a line that's ambiguous even to this technique. so watch out!
+another trick you could use here is, since the filename has to be the same on both sides, you can break the string into two pieces of equal length, and then drop the leading three characters from each half:
+
+```python
+>>> header = ' a/ a/  b/ a/ '
+>>> int(len(header)/2)
+7
+>>> header[3:int(len(header)/2)]
+' a/ '
+>>> header[int(len(header)/2)+3:]
+' a/ '
+```
+
+## extended headers
+
+git patches support a lot of features that the original unified diff format wasn't intended to be aware of. it encodes these features as extended header lines. note that the format of extended header lines changes with the `--full-index` option, which is what we're going to cover here.
+
+```
+old mode <mode>
+new mode <mode>
+```
+
+these header lines are used when a file's mode changes. note that git only knows three modes for files: `100644` (regular files), `100755` (executable files), and `120000` (symbolic links). it doesn't actually remember the entire unix file mode when you commit something.
+
+```
+deleted file mode <mode>
+new file mode <mode>
+```
+
+these header lines indicate that the file has been created or deleted, with the given mode. as mentioned above, the file's actual path is not included here!
+
+```
+copy from <path>
+copy to <path>
+rename from <path>
+rename to <path>
+```
+
+if you enable copy or rename detection, and git believes that this patch represents a copy or rename, then it will set the two filenames in the first line to the names before and after the patch. in addition, it also includes the names here. these header lines are important for correctly parsing the filenames, and they are also necessary to disambiguate renames from copies.
+
+```
+similarity index <number>%
+dissimilarity index <number>%
+```
+
+these lines are only reported on renames/copies. git uses them to tell you how similar it thought the two files were. these aren't interesting to us.
+
+```
+index <sha1>..<sha1> <mode>
+```
+
+the index line indicates the sha1 hashes of the blobs before and after the diff. if the mode was unchanged, it will be mentioned afterwards. however, if it was changed, then it will be omitted from this line, and other extended headers will detail how the mode was affected. if you use `--full-index`, the sha1 hashes will be fully expanded to 40 characters. creations and deletions will use a hash value of zero.
+
+although git appears to generate the extended headers in a consistent order, there's no reason they couldn't be swapped around, so be careful about that when parsing them.
