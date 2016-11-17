@@ -288,13 +288,13 @@ output | HEAD..index | index..worktree | repro example
 `CD` | copied | deleted | `cp foo bar && git add bar && rm bar`
 `??` | untracked | untracked | `touch bar`
 
-the part we really care about is the first character, which represents the diff between HEAD and the index. we can compute that column with `git diff --name-status -z --cached`. we can also potentially make use of the `--diff-filter=M` option to only get modified files (which is what we want, since other forms of modification cannot be absorbed anyway). finally, to get strictly normalized output, we use the plumbing `diff-index` command, and we end up with this:
+the part we really care about is the first character, which represents the diff between HEAD and the index. we can compute that column with `git diff --name-status -z --cached`. we can also potentially make use of the `--diff-filter=M` option to only get modified files (which is what we want, since other forms of modification cannot be absorbed anyway). finally, to get strictly normalized output, we use the plumbing `diff-index` command (notably, `diff-index` is immune to `diff.mnemonicPrefix`), and we end up with this:
 
 ```python
 paths = sorted(invoke('git', 'diff-index', '--name-only', '-z', '--diff-filter=M', '--cached', HEAD).split('\0')[:-1])
 ```
 
-or if we actually wanted the entire patch, we could do this. we have to be careful to pass disabling arguments so that we're isolated from the user's configuration variables. the format of a git patch is documented under the diff-generate-patch man page.
+or if we actually wanted the entire patch, we could do this. we have to be careful to pass disabling arguments so that we're isolated from the user's configuration variables.
 
 ```python
 invoke('git', 'diff-index', '--cached', HEAD, '--diff-filter=M', '--unified=0', '--no-color', '--diff-algorithm=default', '--word-diff=none', '--no-renames', '--full-index', '--binary', '--no-ext-diff', '--no-textconv')
@@ -313,3 +313,57 @@ invoke('git', 'log', '{}^..{}'.format(commit_stack[-1]['commit'], commit_stack[0
 - if file A is copied to file B, does a patch on file A commute backwards past the copy? even though A itself was not modified by the copy, we could argue that later patches to A cannot commute with the copy since they would have affected the copy. in this case we would have to perform copy resolution
 - symbolic refs for locking to protect against multiple git absorbs being run at once
 - to create a partial commit, we would need to patch a tempfile, git-hash-object -w to create a blob for that file, git-mktree to incorporate the blob into a tree object, git-commit-tree to wrap the tree into a commit object, git-update-ref to update a branch with that commit object and reflog it as appropriate
+
+---
+
+# git patch format
+
+https://git-scm.com/docs/diff-generate-patch
+
+## `diff --git`
+
+the first line of any patch between two files takes the form of `diff --git <file1> <file2>`. the two filenames will be the same unless a file was renamed or copied - creations and deletions do _not_ use `/dev/null`.
+
+`<file1>` will be prefixed by `a/` and `<file2>` will be prefixed by `b/`. (there are various config options like `diff.mnemonicPrefix` and `diff.noprefix` that can modify these, but if you use one of the plumbing diff commands, it will ignore those options.) if the filename contains any of tab, newline, quote or backslash, those will be backslash-escaped, and the whole thing will be quoted, so you could have headers like this:
+
+```
+diff --git "a/foo\nbar" "b/foo\nbar"
+```
+
+however, a very important caveat is those are the only characters that will be quoted out. notably, spaces are not quoted, so you can get crap like this:
+
+```
+diff --git a/ a/  b/ a/
+                       ^
+# there's a trailing space here
+```
+
+where did this header come from? `mkdir ' a' && touch ' a/ '`. because of all the jumbled spaces in there, this header is exceedingly difficult to parse. so as a general rule, you want to avoid parsing the names in the first line if possible. for renames and copies, git has extended header lines that can provide an unambiguous prefix-free encoding.
+
+unfortunately there's no way around it for creation and deletion because the extended header lines do not include filenames for those cases. [linus](http://git.661346.n2.nabble.com/git-apply-git-diff-header-lacks-filename-information-for-git-diff-no-index-patch-td1134617.html#a1212949) himself regrets this mistake:
+
+> Exactly. In order to avoid all the ambiguities, we want the filename to
+match on the 'diff -' line to even be able to guess, and if it doesn't, we
+should pick it up from the "rename from" lines (for a git diff), or from
+the '--- a/filename'/'+++ b/filename' otherwise (if it's not a rename, or
+not a git diff).
+
+> ...
+
+> Quite frankly, I should have doen the explicit headers as
+
+>         "new file " <mode> SP <name>
+
+> instead of
+
+>         "new file mode " <mode>
+
+one important note in linus's comment is that, for creation and deletion patches, we expect that `<file1>` and `<file2>` are the same. so hypothetically, you could parse the line using eg a backreferencing regex.
+
+```python
+>>> import re
+>>> re.compile(r'a/(.+) b/\1').match('a/ a/  b/ a/ ').groups()
+(' a/ ',)
+```
+
+but i bet you could construct a line that's ambiguous even to this technique. so watch out!
