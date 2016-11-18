@@ -320,6 +320,8 @@ invoke('git', 'log', '{}^..{}'.format(commit_stack[-1]['commit'], commit_stack[0
 
 https://git-scm.com/docs/diff-generate-patch
 
+https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html
+
 ## `diff --git`
 
 the first line of any patch between two files takes the form of `diff --git <file1> <file2>`. the two filenames will be the same unless a file was renamed or copied - creations and deletions do _not_ use `/dev/null`.
@@ -419,3 +421,64 @@ index <sha1>..<sha1> <mode>
 the index line indicates the sha1 hashes of the blobs before and after the diff. if the mode was unchanged, it will be mentioned afterwards. however, if it was changed, then it will be omitted from this line, and other extended headers will detail how the mode was affected. if you use `--full-index`, the sha1 hashes will be fully expanded to 40 characters. creations and deletions will use a hash value of zero.
 
 although git appears to generate the extended headers in a consistent order, there's no reason they couldn't be swapped around, so be careful about that when parsing them.
+
+## standard two-line header
+
+at this point, we're mostly back into the territory of standard unified diffs. the next two lines represent the filename headers:
+
+```
+--- <file1>
++++ <file2>
+```
+
+the filenames used here obey the same rules as the ones in the first line - they have the `a/` and `b/` prefixes, they'll be quoted and backslash-escaped if they contain unexpected characters, etc. because each of these lines contains only one filename, they're pretty easy to parse. but remember, if the file didn't have any lines changed, these lines (and everything after them) will be omitted! so adding/removing empty files, or just modifying file modes, will not include these lines. you'll have to resort to parsing the first line in that case.
+
+## hunk header
+
+hunk headers are always delimited by a pair of `@@` signs. git may add more stuff after the closing `@@`, but we're going to ignore it. between the two signs are a few numbers:
+
+```
+@@ -421,0 +424,15 @@
+```
+
+the first set represents the lines before the patch, the second set represents the line after. the first number in the pair represents the starting line, and the second one is the total number of lines that the patch contains for that side (omitted, if 1).
+
+## diff lines
+
+after the header for a hunk come one or more lines of actual text. the lines take one of four forms:
+
+- a leading space, followed by the actual text of the line: a line that was unaffected by the hunk. (note that, because we use `--unified=0`, we do not have to parse these)
+- a `-`, followed by the text that was removed: a line that was deleted, present in the old side of the hunk but not the new one
+- a `+`, followed by the text that was added: a line that was created, present in the new side of the hunk but not the old one
+- a `\`, indicating a special message. git mainly uses this to say `\No newline at end of file`
+
+after the diff lines finish, another hunk header may appear, with more diff lines, etc.
+
+an important caveat of the diff line formulation is that git will only break hunks apart if the number of unchanged lines between them is _greater than_ the value of `--unified`. if it's less than or equal to that value, git will merge the hunks together and retain the unchanged lines in the middle. in addition, although most patch generators will put all the contiguous `-` lines together, then all the contiguous `+` lines, there's no reason to assume that's the case. so to parse a hunk's lines correctly, you need to:
+
+- consume the unchanged lines up until the first line that's actually changed
+- consume all of those changed lines (gathering them into added and removed sequences)
+- consume all the unchanged lines after that
+- package the groups (unchanged before, removed, added, unchanged after) into one hunk, and tweak the line counts accordingly
+- save the "unchanged after" section in case it's actually the "unchanged before" section of the next hunk
+
+# applying hunks
+
+applying a hunk is fundamentally not that hard of a process. the reason for this is that a hunk is, by definition, contiguous - there may be unchanged lines at the start and end, but there are never any in the middle, or you'd have two separate hunks. (git may have reported multiple hunks as one, but if you parsed them correctly, then they should be split back up.) the method looks like this:
+
+- jump to the starting line number of the hunk
+- iterate over the lines in the "unchanged before" section. optionally, you can make sure these match the things in the actual text
+- iterate through the removed and added sections simultaneously, replacing old lines with new lines. optionally, you can make sure the old lines match the things in the actual text that are being removed
+- if the added section runs out before the removed section, just keep removing the remaining lines in the removed section
+- conversely, if the removed section runs out before the added section, add those remaining lines, iterating down through the file accordingly
+- iterate over the lines in the "unchanged after" section, as with the before section
+
+and of course, you would want to make sure that the total number of lines you covered on each side matches the number recorded in the hunk header.
+
+# commuting hunks
+
+commuting hunks is mostly a matter of juggling line numbers. swapping two hunks around results in two new hunks which, when applied, would have the same result as the original two hunks. traditional patch tools detect commutation using the unchanged lines in the patch, and try to find those unchanged lines elsewhere in the file to see if the patch has been offset by another one that was applied earlier. since we are mostly ignoring context, our approach is slightly different.
+
+first off, we have to make sure that the two hunks actually can commute. we confirm this by checking the range of lines added/removed (whichever is wider) in each hunk. if these ranges are not separated by at least one unchanged line, then the two hunks do not commute, and we maintain their previously existing ordering (which is something we know, in the case of absorb).
+
+if the two change ranges are separated by at least one unchanged line, then the hunks can commute. it's important to note that we know one of the hunks comes first, and the other comes second, so when we commute them, the two resulting hunks will be in the opposite order.
