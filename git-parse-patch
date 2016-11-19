@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+
+import sys
+import itertools
+import pprint
+
+
+def deprefix(val, prefix, check=False):
+    if val.startswith(prefix):
+        return val[len(prefix):]
+    elif check:
+        raise RuntimeError('{!r} does not start with {!r}'.format(val, prefix))
+    return val
+
+
+def desuffix(val, suffix, check=False):
+    if val.endswith(suffix):
+        return val[:-len(suffix)]
+    elif check:
+        raise RuntimeError('{!r} does not end with {!r}'.format(val, suffix))
+    return val
+
+
+def parse_helper_quoted_filename(filename):
+    # TODO: actually parse the quotes and replace the four possible escape codes
+    return filename
+
+
+def parse_helper_index_header(index):
+    index_split = index.split(' ')
+    [blob_old, blob_new] = index_split[0].split('..')
+    if len(index_split) == 1:
+        mode = ''
+    elif len(index_split) == 2:
+        mode = index_split[1]
+    else:
+        raise RuntimeError('index contains multiple splits {!r}'.format(index_split))
+    return {
+        'old': blob_old,
+        'new': blob_new,
+        'mode': mode,
+    }
+
+
+def parse_helper_hunk_count(hunk_count):
+    numbers = hunk_count[1:].split(',')
+    if len(numbers) == 1:
+        return {'start': numbers[0], 'count': 1}
+    if len(numbers) == 2:
+        return {'start': numbers[0], 'count': numbers[1]}
+    raise RuntimeError('hunk line count {!r} contains too many commas'.format(hunk_count))
+
+
+EXTENDED_HEADER_MAP = {
+    'old mode': None,
+    'new mode': None,
+    'deleted file mode': None,
+    'new file mode': None,
+    'copy from': parse_helper_quoted_filename,
+    'copy to': parse_helper_quoted_filename,
+    'rename from': parse_helper_quoted_filename,
+    'rename to': parse_helper_quoted_filename,
+    'similarity index': None,
+    'dissimilarity index': None,
+    'index': parse_helper_index_header,
+    # these aren't really extended headers, but we can parse them as if they were
+    '---': parse_helper_quoted_filename,
+    '+++': parse_helper_quoted_filename,
+}
+
+
+# TODO: we use a dict so that we don't have to define __repr__, but we should
+# probably define a proper class
+class PatchSet(dict):
+    def __init__(self, stream):
+        self['patches'] = []
+        # discard the trailing newlines on the input lines, and return None
+        # after exhausting the iterator to avoid getting a StopIteration
+        # TODO: can we use StopIteration to signal unexpected failure and use
+        # None to delimit successfully parsed patches?
+        self.stream = itertools.chain(map(lambda line: line[:-1], stream), itertools.repeat(None))
+        next_state = self.parse_header_first
+        next_line = next(self.stream)
+        while next_line is not None:
+            next_state, next_line = next_state(next_line)
+
+    def cur_patch(self):
+        return self['patches'][-1]
+
+    def cur_hunk(self):
+        return self.cur_patch['hunks'][-1]
+
+    def parse_header_first(self, line):
+        if not line.startswith('diff --git '):
+            raise RuntimeError('{!r} is not a git patch header'.format(line))
+        self['patches'].append({
+            'header': line,
+            'extended': {},
+            'hunks': [],
+        })
+        return self.parse_extended_headers, next(self.stream)
+
+    def parse_extended_headers(self, line):
+        for prefix, line_parser in EXTENDED_HEADER_MAP.items():
+            try:
+                rest_of_line = deprefix(line, prefix + ' ', check=True)
+            except RuntimeError:
+                continue
+            if callable(line_parser):
+                rest_of_line = line_parser(rest_of_line)
+            if prefix in self.cur_patch()['extended']:
+                raise RuntimeError('already parsed extended header {!r} to {!r}, cannot set to {!r}'.format(prefix, self.cur_patch()['extended'][prefix], rest_of_line))
+            self.cur_patch()['extended'][prefix] = rest_of_line
+            return self.parse_extended_headers, next(self.stream)
+        # this is not an extended header, so we must be onto hunks
+        return self.parse_hunk_header, line
+
+    def parse_hunk_header(self, line):
+        [hunk_start, before_lines, after_lines, hunk_end] = line.split(' ', maxsplit=3)
+        if not (hunk_start == '@@' and hunk_end.startswith('@@') and before_lines.startswith('-') and after_lines.startswith('+')):
+            raise RuntimeError('{!r} is not a hunk header'.format(line))
+        self.cur_patch()['hunks'].append({
+            'before': parse_helper_hunk_count(before_lines),
+            'after': parse_helper_hunk_count(after_lines),
+            # TODO: do we care about this part? can we reconstruct it when
+            # splitting a joined hunk into many? if not we should remove it
+            'header': '' if hunk_end == '@@' else deprefix(hunk_end, '@@ '),
+        })
+        return self.parse_diff_lines, next(self.stream)
+
+    def parse_diff_lines(self, line):
+        # TODO: this function
+        return None, None
+
+
+pprint.pprint(PatchSet(sys.stdin))
