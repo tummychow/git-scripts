@@ -136,4 +136,4 @@ commit_stack = list(itertools.takewhile(lambda commit: len(commit['parents']) <=
 if len(commit_stack) > MAX_STACK and not FORCE:
     commit_stack = commit_stack[:MAX_STACK]
 
-print(repr(commit_stack))
+print('\n'.join(map(lambda commit: '{} -> {} ({})'.format(commit['commit'], commit['parents'][0], commit['author']), commit_stack)))
