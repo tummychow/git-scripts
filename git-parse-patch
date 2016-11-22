@@ -16,18 +16,46 @@ def desuffix(val, suffix, check=False):
     return val
 
 
+def parse_helper_mode_header(mode):
+    # git does not preserve all file permission bits, it only knows of four
+    # possible modes
+    if mode == '100644':
+        return 'regular'
+    if mode == '100755':
+        return 'executable'
+    if mode == '120000':
+        return 'symlink'
+    if mode == '160000':
+        return 'submodule'
+    raise RuntimeError('{!r} is not a recognized mode'.format(mode))
+
+
 def parse_helper_quoted_filename(filename):
-    # TODO: actually parse the quotes and replace the four possible escape codes
+    # git will quote a filename if it contains at least one of: tab, newline,
+    # quote or backslash
+    # it will quote the entire filename and then backslash-escape all of those
+    # characters
+    # if a filename does not contain any of those, then git will print it
+    # completely unquoted
     return filename
 
 
+def parse_helper_similarity(similarity_percent):
+    return int(deprefix(similarity_percent, '%', check=True))
+
+
 def parse_helper_index_header(index):
+    # the index extended header consists of the sha1 hashes of the blobs before
+    # and after the diff, separated by a ".."
+    # the index header will then have the mode, if it was unchanged
+    # if the mode was changed, then the index header will omit it, and other
+    # headers will indicate the changes that applied there
     index_split = index.split(' ')
     [blob_old, blob_new] = index_split[0].split('..')
     if len(index_split) == 1:
         mode = ''
     elif len(index_split) == 2:
-        mode = index_split[1]
+        mode = parse_helper_mode_header(index_split[1])
     else:
         raise RuntimeError('index contains multiple splits {!r}'.format(index_split))
     return {
@@ -38,6 +66,11 @@ def parse_helper_index_header(index):
 
 
 def parse_helper_hunk_count(hunk_count):
+    # a hunk header's line count consists of a "+" or "-", then a number, then
+    # a comma, then another number
+    # the first number is the start line of that side of the hunk, and the
+    # second number is the number of lines that side spans
+    # the comma and the count may be omitted if the hunk spans exactly one line
     numbers = hunk_count[1:].split(',')
     if len(numbers) == 1:
         return {'start': numbers[0], 'count': 1}
@@ -47,21 +80,101 @@ def parse_helper_hunk_count(hunk_count):
 
 
 EXTENDED_HEADER_MAP = {
-    'old mode': None,
-    'new mode': None,
-    'deleted file mode': None,
-    'new file mode': None,
+    'old mode': parse_helper_mode_header,
+    'new mode': parse_helper_mode_header,
+    'deleted file mode': parse_helper_mode_header,
+    'new file mode': parse_helper_mode_header,
     'copy from': parse_helper_quoted_filename,
     'copy to': parse_helper_quoted_filename,
     'rename from': parse_helper_quoted_filename,
     'rename to': parse_helper_quoted_filename,
-    'similarity index': None,
-    'dissimilarity index': None,
+    'similarity index': parse_helper_similarity,
+    'dissimilarity index': parse_helper_similarity,
     'index': parse_helper_index_header,
-    # these aren't really extended headers, but we can parse them as if they were
-    '---': parse_helper_quoted_filename,
-    '+++': parse_helper_quoted_filename,
 }
+
+
+class DiffList(list):
+    def __init__(self, stream):
+        # discard the trailing newline on each input line
+        self.stream = map(lambda line: desuffix(line, '\n'), stream)
+        next_state = self.parse_git_headers
+        next_line = next(self.stream, None)
+        while next_line is not None:
+            next_state, next_line = next_state(next_line)
+
+    # TODO: is it convenient to invoke this with no arguments and fetch the next
+    # line from here by default?
+    def parse_git_headers(self, line):
+        # a git patch starts with "diff --git <file1> <file2>"
+        # <file1> and <file2> start with "a/" and "b/" prefixes, respectively
+        # (note: the prefixes may be affected by diff.mnemonicPrefix or
+        # diff.noprefix, but if you use a plumbing command, those variables
+        # will be ignored)
+        # ignoring those prefixes, the two names will always be the same unless
+        # the file was renamed/copied
+        # (note: they will still be the same if the file was created or
+        # deleted, /dev/null is not used here)
+        # if the filenames contain newlines, quotes, tabs or backslashes, those
+        # will be backslash-escaped, and the entire name will be quoted
+        # however, spaces will NOT be backslash escaped, so you can't reliably
+        # parse the filenames in this line unless you know they're the same (in
+        # which case you would also know they had the same length)
+        if not line.startswith('diff --git '):
+            raise RuntimeError('{!r} is not a git patch header'.format(line))
+        INIT_HEADER = line
+
+        # after that come one or more extended headers, used to indicate file
+        # modes and copies/renames
+        # the extended headers can theoretically appear in any order, but there
+        # should be at most one of each type
+        EXTENDED_HEADERS = {}
+        for line in self.stream:
+            for prefix, line_parser in EXTENDED_HEADER_MAP.items():
+                try:
+                    rest_of_line = deprefix(line, prefix + ' ', check=True)
+                except RuntimeError:
+                    continue
+                if callable(line_parser):
+                    rest_of_line = line_parser(rest_of_line)
+                if prefix in EXTENDED_HEADERS:
+                    raise RuntimeError('already parsed extended header {!r} to {!r}, cannot set to {!r}'.format(prefix, EXTENDED_HEADERS[prefix], rest_of_line))
+                EXTENDED_HEADERS[prefix] = rest_of_line
+                break
+            else:
+                # none of the prefixes matched, so this line is not an extended
+                # header
+                break
+        # we parsed every line as an extended header, and exhausted the input
+        # this is a valid termination condition, since the patch may contain no
+        # actual changed lines
+        # TODO: it's impossible to have zero extended headers, what are the
+        # minimal valid combinations? we always need index right?
+        return None, None
+
+    def parse_standard_headers(self, line):
+        # if there are no more extended headers and we still have lines to
+        # parse, there are three possibilities:
+        # this could be the start of a completely new diff
+        if line.startswith('diff --git '):
+            return self.parse_git_headers, line
+        # this could be the start of a binary patch
+        if line == 'GIT binary patch':
+            return self.parse_binary_patch, line
+        # or this could be a text patch
+        if line.startswith('--- '):
+            # a text patch always has a "---" line and then a "+++" line, which
+            # can also be quoted
+            OLD_FILE = parse_helper_quoted_filename(deprefix(line, '--- ', check=True))
+            NEW_FILE = parse_helper_quoted_filename(deprefix(next(self.stream), '+++ ', check=True))
+            # there must be at least one hunk following this header
+            return self.parse_text_hunk, next(self.stream)
+
+    def parse_binary_patch(self, line):
+        pass
+
+    def parse_text_hunk(self, line):
+        pass
 
 
 # TODO: we use a dict so that we don't have to define __repr__, but we should
@@ -105,7 +218,6 @@ class RawPatch(dict):
                 raise RuntimeError('already parsed extended header {!r} to {!r}, cannot set to {!r}'.format(prefix, self.cur_patch()['extended'][prefix], rest_of_line))
             self.cur_patch()['extended'][prefix] = rest_of_line
             return self.parse_extended_headers, next(self.stream)
-        # this is not an extended header, so we must be onto hunks
         return self.parse_hunk_header, line
 
     def parse_hunk_header(self, line):
@@ -119,8 +231,6 @@ class RawPatch(dict):
             'before': parse_helper_hunk_count(before_lines),
             'after': parse_helper_hunk_count(after_lines),
             'lines': [],
-            # TODO: do we care about this part? can we reconstruct it when
-            # splitting a joined hunk into many? if not we should remove it
             'header': '' if hunk_end == '@@' else deprefix(hunk_end, '@@ '),
         })
         return self.parse_diff_lines, next(self.stream)
@@ -145,7 +255,6 @@ class RawPatch(dict):
                 'type': forward_type,
                 'bytes': int(forward_bytes),
             }
-            # the binary hunk ends in an empty line, skip to that point
             for line in self.stream:
                 if line == '':
                     break
@@ -156,7 +265,6 @@ class RawPatch(dict):
                     'type': backward_type,
                     'bytes': int(backward_bytes),
                 }
-                # this hunk contains two binary hunks and we are on the second
                 for line in self.stream:
                     if line == '':
                         break
