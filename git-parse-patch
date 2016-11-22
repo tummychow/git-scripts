@@ -73,9 +73,9 @@ def parse_helper_hunk_count(hunk_count):
     # the comma and the count may be omitted if the hunk spans exactly one line
     numbers = hunk_count[1:].split(',')
     if len(numbers) == 1:
-        return {'start': numbers[0], 'count': 1}
+        return {'start': int(numbers[0]), 'count': 1}
     if len(numbers) == 2:
-        return {'start': numbers[0], 'count': numbers[1]}
+        return {'start': int(numbers[0]), 'count': int(numbers[1])}
     raise RuntimeError('hunk line count {!r} contains too many commas'.format(hunk_count))
 
 
@@ -165,7 +165,7 @@ class DiffList(list):
         if line is None:
             return None, None
         # otherwise, the next line should be the start of a standard patch
-        return parse_standard_headers, line
+        return self.parse_standard_headers, line
 
     def parse_standard_headers(self, line):
         # if there are no more extended headers and we still have lines to
@@ -269,7 +269,7 @@ class DiffList(list):
         # line must itself be the end of the hunk
         before_seen = 0
         after_seen = 0
-        while before_seen < before['count'] and after_seen < after['count']:
+        while before_seen < before['count'] or after_seen < after['count']:
             # TODO: actually implement the hunk line state machine
             line = next(self.stream)
             if line.startswith(' '):
@@ -395,4 +395,4 @@ class RawPatch(dict):
 
 import sys
 import json
-print(json.dumps(RawPatch(sys.stdin), indent=4))
+print(json.dumps(DiffList(sys.stdin), indent=4))
