@@ -94,13 +94,15 @@ EXTENDED_HEADER_MAP = {
 }
 
 
+# terminology:
+# a diff is composed of multiple patches, which is composed of multiple hunks
 class DiffList(list):
     def __init__(self, stream):
         # discard the trailing newline on each input line
         self.stream = map(lambda line: desuffix(line, '\n'), stream)
         next_state = self.parse_git_headers
         next_line = next(self.stream, None)
-        while next_line is not None:
+        while next_state is not None:
             next_state, next_line = next_state(next_line)
 
     # TODO: is it convenient to invoke this with no arguments and fetch the next
@@ -122,13 +124,13 @@ class DiffList(list):
         # which case you would also know they had the same length)
         if not line.startswith('diff --git '):
             raise RuntimeError('{!r} is not a git patch header'.format(line))
-        INIT_HEADER = line
+        self.append({'init_header': line})
 
         # after that come one or more extended headers, used to indicate file
         # modes and copies/renames
         # the extended headers can theoretically appear in any order, but there
         # should be at most one of each type
-        EXTENDED_HEADERS = {}
+        ext_headers = {}
         for line in self.stream:
             for prefix, line_parser in EXTENDED_HEADER_MAP.items():
                 try:
@@ -137,20 +139,33 @@ class DiffList(list):
                     continue
                 if callable(line_parser):
                     rest_of_line = line_parser(rest_of_line)
-                if prefix in EXTENDED_HEADERS:
-                    raise RuntimeError('already parsed extended header {!r} to {!r}, cannot set to {!r}'.format(prefix, EXTENDED_HEADERS[prefix], rest_of_line))
-                EXTENDED_HEADERS[prefix] = rest_of_line
+                if prefix in ext_headers:
+                    raise RuntimeError('already parsed extended header {!r} to {!r}, cannot set to {!r}'.format(prefix, ext_headers[prefix], rest_of_line))
+                ext_headers[prefix] = rest_of_line
                 break
             else:
                 # none of the prefixes matched, so this line is not an extended
                 # header
                 break
-        # we parsed every line as an extended header, and exhausted the input
-        # this is a valid termination condition, since the patch may contain no
-        # actual changed lines
-        # TODO: it's impossible to have zero extended headers, what are the
-        # minimal valid combinations? we always need index right?
-        return None, None
+        else:
+            # we have exhausted the input, and every line was an extended
+            # header
+            line = None
+        # we have stopped parsing extended headers, either because we reached a
+        # line that was not an extended header, or because we ran out of lines
+        # first we need to validate the extended headers we have parsed
+        if 'index' not in ext_headers:
+            # TODO: index is always included, right? what other combinations
+            # are impossible?
+            raise RuntimeError('extended headers {!r} did not contain index line'.format(ext_headers))
+        # TODO: if this is not a copy or rename, we should parse the init line
+        # here to get the path that was changed
+        self[-1]['extended_headers'] = ext_headers
+        # if we've run out of lines, then that's it
+        if line is None:
+            return None, None
+        # otherwise, the next line should be the start of a standard patch
+        return parse_standard_headers, line
 
     def parse_standard_headers(self, line):
         # if there are no more extended headers and we still have lines to
@@ -165,16 +180,119 @@ class DiffList(list):
         if line.startswith('--- '):
             # a text patch always has a "---" line and then a "+++" line, which
             # can also be quoted
-            OLD_FILE = parse_helper_quoted_filename(deprefix(line, '--- ', check=True))
-            NEW_FILE = parse_helper_quoted_filename(deprefix(next(self.stream), '+++ ', check=True))
+            # TODO: ignore these lines in favor of the lines parsed from the
+            # headers earlier (these would be omitted if the patch was empty)
+            self[-1]['before_path'] = parse_helper_quoted_filename(deprefix(line, '--- ', check=True))
+            self[-1]['after_path'] = parse_helper_quoted_filename(deprefix(next(self.stream), '+++ ', check=True))
+            self[-1]['text_hunks'] = []
             # there must be at least one hunk following this header
             return self.parse_text_hunk, next(self.stream)
 
     def parse_binary_patch(self, line):
-        pass
+        # git starts a binary patch using this special header line
+        if line != 'GIT binary patch':
+            raise RuntimeError('{!r} is not the header of a git binary patch'.format(line))
+        # a binary patch is always followed by one binary hunk, which we skip
+        # over
+        self.parse_binary_hunk(next(self.stream))
+        # at this point, the patch could be over
+        line = next(self.stream, None)
+        if line is None:
+            return None, None
+        if line.startswith('diff --git '):
+            return self.parse_git_headers, line
+        # or it could contain another binary hunk, which is the inverse of the
+        # first one
+        self.parse_binary_hunk(line)
+        # there cannot be more than two binary hunks in a binary patch, and
+        # there can only be one binary patch per file, so at this point, the
+        # patch must be over
+        return None, None
+
+    # TODO: this should be a parser helper
+    def parse_binary_hunk(self, line):
+        # a binary hunk starts with the word "literal" or "delta", then the
+        # number of uncompressed bytes in the patch
+        # literal and delta refer to the way the patch has been encoded, either
+        # a binary dump of the entire file, or a diff from one version to the
+        # next
+        if not (line.startswith('literal ') or line.startswith('delta ')):
+            raise RuntimeError('{!r} is not the start of a git binary hunk'.format(line))
+        [hunk_type, hunk_length] = line.split(' ')
+        # after the length comes a series of binary data lines
+        # each line starts with a single character indicating its length,
+        # mapping 1-52 bytes to the letters A-Za-z (so A means the line has one
+        # byte of data, z means 52 bytes, etc)
+        # after the length indicator are the indicated number of bytes, in
+        # a custom base85 encoding (similar to zeromq base85)
+        # like zeromq's version, the input binary is interpreted in big-endian
+        # 4-byte chunks, and each chunk gets encoded to 5 chars
+        # however, unlike zeromq, git uses 0-9A-Za-z!#$%&()*+-;<=>?@^_`{|}~ as
+        # its mapping
+        # padding is done with zero bytes, but since we already know the length
+        # from the indicator, we know exactly how much padding there is, and
+        # can discard it automatically
+        for line in self.stream:
+            # the base85 data is terminated by an empty line
+            # since we don't care about the actual data, we just skip until we
+            # find that line
+            if line == '':
+                break
+        else:
+            raise RuntimeError('could not find empty line terminator in binary hunk')
 
     def parse_text_hunk(self, line):
-        pass
+        # a text hunk always starts with a header of the form
+        # @@ <before_lines> <after_lines> @@ <optional context>
+        [start, before, after, end] = line.split(' ', maxsplit=3)
+        if not (start == '@@' and end.startswith('@@')):
+            raise RuntimeError('{!r} is not a hunk header, missing @@ delimiters'.format(line))
+        # the before count starts with a "-", and the after count starts with a
+        # "+"
+        if not (before.startswith('-') and after.startswith('+')):
+            raise RuntimeError('{!r} is not a hunk header, line counts should start with -+'.format(line))
+        before = parse_helper_hunk_count(before)
+        after = parse_helper_hunk_count(after)
+        # after a hunk header, we have the actual hunk lines
+        # the lines fall into three categories:
+        # context (starting with a space)
+        # before (starting with a "-")
+        # after (starting with a "+")
+        # the lines must come in contiguous blocks of before, then after,
+        # with blocks of context lines possibly appearing between, and at the
+        # start/end
+        # in addition, git exposes a special line starting with a backslash,
+        # "\ No newline at end of file", which indicates that the preceding
+        # line did not have a newline terminator
+        # by its very nature, this line must come at the end of its block, and
+        # if the no-newline indicator is attached to a context block, then that
+        # line must itself be the end of the hunk
+        before_seen = 0
+        after_seen = 0
+        while before_seen < before['count'] and after_seen < after['count']:
+            # TODO: actually implement the hunk line state machine
+            line = next(self.stream)
+            if line.startswith(' '):
+                before_seen += 1
+                after_seen += 1
+            elif line.startswith('-'):
+                before_seen += 1
+            elif line.startswith('+'):
+                after_seen += 1
+            elif line == '\ No newline at end of file':
+                pass
+            else:
+                raise RuntimeError('{!r} not expected in hunk'.format(line))
+        # the end of a hunk could also be the end of the entire patch
+        # TODO: this code is very similar to what we do when we've parsed a
+        # binary patch, is there a way to factor this out?
+        line = next(self.stream, None)
+        if line is None:
+            return None, None
+        if line.startswith('diff --git '):
+            return self.parse_git_headers, line
+        # otherwise it must be followed by another hunk
+        return self.parse_text_hunk, line
 
 
 # TODO: we use a dict so that we don't have to define __repr__, but we should
