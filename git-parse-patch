@@ -69,16 +69,13 @@ EXTENDED_HEADER_MAP = {
 class RawPatch(dict):
     def __init__(self, stream):
         self['patches'] = []
-        # discard the trailing newlines on the input lines, and return None
-        # after exhausting the iterator to avoid getting a StopIteration
-        # TODO: can we use StopIteration to signal unexpected failure and use
-        # None to delimit successfully parsed patches?
-        import itertools
-        self.stream = itertools.chain(map(lambda line: line[:-1], stream), itertools.repeat(None))
+        # discard the trailing newlines on the input lines
+        self.stream = map(lambda line: line[:-1], stream)
         next_state = self.parse_header_first
         next_line = next(self.stream)
         while next_line is not None:
             next_state, next_line = next_state(next_line)
+        self.clean()
 
     def cur_patch(self):
         return self['patches'][-1]
@@ -134,7 +131,7 @@ class RawPatch(dict):
                 'type': line[0],
                 'line': line[1:],
             })
-            return self.parse_diff_lines, next(self.stream)
+            return self.parse_diff_lines, next(self.stream, None)
         if line[0] == '@':
             return self.parse_hunk_header, line
         if line[0] == 'd':
@@ -163,8 +160,11 @@ class RawPatch(dict):
                 for line in self.stream:
                     if line == '':
                         break
-            return self.parse_header_first, next(self.stream)
+            return self.parse_header_first, next(self.stream, None)
         raise RuntimeError('{!r} is not a binary hunk header'.format(line))
+
+    def clean(self):
+        pass
 
 
 import sys
