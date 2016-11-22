@@ -66,7 +66,7 @@ EXTENDED_HEADER_MAP = {
 
 # TODO: we use a dict so that we don't have to define __repr__, but we should
 # probably define a proper class
-class PatchSet(dict):
+class RawPatch(dict):
     def __init__(self, stream):
         self['patches'] = []
         # discard the trailing newlines on the input lines, and return None
@@ -84,7 +84,7 @@ class PatchSet(dict):
         return self['patches'][-1]
 
     def cur_hunk(self):
-        return self.cur_patch['hunks'][-1]
+        return self.cur_patch()['hunks'][-1]
 
     def parse_header_first(self, line):
         if not line.startswith('diff --git '):
@@ -112,12 +112,16 @@ class PatchSet(dict):
         return self.parse_hunk_header, line
 
     def parse_hunk_header(self, line):
+        if line == 'GIT binary patch':
+            self.cur_patch()['binary'] = {}
+            return self.parse_skip_binary_patch, next(self.stream)
         [hunk_start, before_lines, after_lines, hunk_end] = line.split(' ', maxsplit=3)
         if not (hunk_start == '@@' and hunk_end.startswith('@@') and before_lines.startswith('-') and after_lines.startswith('+')):
             raise RuntimeError('{!r} is not a hunk header'.format(line))
         self.cur_patch()['hunks'].append({
             'before': parse_helper_hunk_count(before_lines),
             'after': parse_helper_hunk_count(after_lines),
+            'lines': [],
             # TODO: do we care about this part? can we reconstruct it when
             # splitting a joined hunk into many? if not we should remove it
             'header': '' if hunk_end == '@@' else deprefix(hunk_end, '@@ '),
@@ -125,10 +129,44 @@ class PatchSet(dict):
         return self.parse_diff_lines, next(self.stream)
 
     def parse_diff_lines(self, line):
-        # TODO: this function
-        return None, None
+        if line[0] in '+- \\':
+            self.cur_hunk()['lines'].append({
+                'type': line[0],
+                'line': line[1:],
+            })
+            return self.parse_diff_lines, next(self.stream)
+        if line[0] == '@':
+            return self.parse_hunk_header, line
+        if line[0] == 'd':
+            return self.parse_header_first, line
+        raise RuntimeError('{!r} starts with an unexpected character'.format(line))
+
+    def parse_skip_binary_patch(self, line):
+        if line.startswith('literal ') or line.startswith('delta '):
+            [forward_type, forward_bytes] = line.split(' ')
+            self.cur_patch()['binary']['forward'] = {
+                'type': forward_type,
+                'bytes': int(forward_bytes),
+            }
+            # the binary hunk ends in an empty line, skip to that point
+            for line in self.stream:
+                if line == '':
+                    break
+            line = next(self.stream)
+            if line.startswith('literal ') or line.startswith('delta '):
+                [backward_type, backward_bytes] = line.split(' ')
+                self.cur_patch()['binary']['backward'] = {
+                    'type': backward_type,
+                    'bytes': int(backward_bytes),
+                }
+                # this hunk contains two binary hunks and we are on the second
+                for line in self.stream:
+                    if line == '':
+                        break
+            return self.parse_header_first, next(self.stream)
+        raise RuntimeError('{!r} is not a binary hunk header'.format(line))
 
 
 import sys
-import pprint
-pprint.pprint(PatchSet(sys.stdin))
+import json
+print(json.dumps(RawPatch(sys.stdin), indent=4))

@@ -462,6 +462,18 @@ an important caveat of the diff line formulation is that git will only break hun
 - package the groups (unchanged before, removed, added, unchanged after) into one hunk, and tweak the line counts accordingly
 - save the "unchanged after" section in case it's actually the "unchanged before" section of the next hunk
 
+## binary patches
+
+binary patches behave quite differently. if you use one of the higher-level diffing tools, the entire binary content will be obscured and git will just say "binary files foo and bar differ". however, using a plumbing diff command will reveal the actual content of a binary patch. each binary patch consists of either one or two binary hunks (the second one represents the reverse of the first one, if such a reversal exists). the first line of the patch content, after the extended headers, is simply `GIT binary patch`.
+
+the hunk format starts with a header line of a word, a space and a number. the word is either `literal` or `delta`, indicating the patch's representation. the number represents how long the patch data was, in bytes, before being compressed.
+
+after this is a sequence of binary data lines. the sequence is terminated by an empty newline. each data line consists of a single character indicating the line's total length, and then that many bytes of base85 encoded deflated data. (the length is represented as a char from `A-Za-z` in that order, so `A` is one byte, `z` is 52.) note that git's base85 encoding table is different from that of the zeromq standard.
+
+fortunately for us, we don't have to worry about parsing binary diffs, since we simply don't care about them. we can iterate down through the lines until we reach the empty line that signifies the end of the hunk, and then resume processing.
+
+note that git does not allow more than one `GIT binary patch` per `diff --git`. they have a one-to-one correspondence. so once you finish parsing the one or two binary hunks, you are back to the diff header.
+
 # applying hunks
 
 applying a hunk is fundamentally not that hard of a process. the reason for this is that a hunk is, by definition, contiguous - there may be unchanged lines at the start and end, but there are never any in the middle, or you'd have two separate hunks. (git may have reported multiple hunks as one, but if you parsed them correctly, then they should be split back up.) the method looks like this:
