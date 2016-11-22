@@ -450,7 +450,7 @@ after the header for a hunk come one or more lines of actual text. the lines tak
 - a leading space, followed by the actual text of the line: a line that was unaffected by the hunk. (note that, because we use `--unified=0`, we do not have to parse these)
 - a `-`, followed by the text that was removed: a line that was deleted, present in the old side of the hunk but not the new one
 - a `+`, followed by the text that was added: a line that was created, present in the new side of the hunk but not the old one
-- a `\`, indicating a special message. git mainly uses this to say `\No newline at end of file`
+- a `\`, indicating a special message. git mainly uses this to say `\ No newline at end of file`
 
 after the diff lines finish, another hunk header may appear, with more diff lines, etc.
 
@@ -461,6 +461,36 @@ an important caveat of the diff line formulation is that git will only break hun
 - consume all the unchanged lines after that
 - package the groups (unchanged before, removed, added, unchanged after) into one hunk, and tweak the line counts accordingly
 - save the "unchanged after" section in case it's actually the "unchanged before" section of the next hunk
+
+the `\ No newline at end of file` is a particularly finicky line to get right. the way you should interpret this line is that it indicates the preceding line of the diff was missing a newline. for example, consider this diff:
+
+```diff
+diff --git a/bar b/bar
+index ba0e162e1c47469e3fe4b393a8bf8c569f302116..cb7564bf40095482ed2716c21a4eeba44eaf4ff0 100644
+--- a/bar
++++ b/bar
+@@ -1 +1,2 @@
+-bar
+\ No newline at end of file
++bar
++foo
+\ No newline at end of file
+```
+
+you might be wondering, why is the `bar` line printed both times? well on the old side of the diff, the line is `bar` with no newline. but in the new side of the diff, the line is actually `bar` with a newline, which is a change from the old value. so the line gets printed both times. you can also see that the no-newline indicator gets printed on both sides of the diff. it's not treated as context. semantically, it's attached to the line that came immediately before it. another example:
+
+```diff
+diff --git a/bar b/bar
+index ba0e162e1c47469e3fe4b393a8bf8c569f302116..a907ec3f431eeb6b1c75799a7e4ba73ca6dc627a 100644
+--- a/bar
++++ b/bar
+@@ -1 +1,2 @@
++foo
+ bar
+\ No newline at end of file
+```
+
+in this case, the old content was `bar` with no newline, and the new content is the line `foo`, followed by the line `bar` (still with no newline). so `bar` can be treated as context here, and the no-newline indicator is attached to that context line.
 
 ## binary patches
 
