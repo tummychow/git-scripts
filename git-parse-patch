@@ -127,13 +127,16 @@ class DiffList(list):
         # which case you would also know they had the same length)
         if not line.startswith('diff --git '):
             raise RuntimeError('{!r} is not a git patch header'.format(line))
-        self.append({'init_header': line})
+        ext_headers = {}
+        self.append({
+            'init_header': line,
+            'extended_headers': ext_headers,
+        })
 
         # after that come one or more extended headers, used to indicate file
         # modes and copies/renames
         # the extended headers can theoretically appear in any order, but there
         # should be at most one of each type
-        ext_headers = {}
         for line in self.stream:
             for prefix, line_parser in EXTENDED_HEADER_MAP.items():
                 try:
@@ -149,33 +152,23 @@ class DiffList(list):
             else:
                 # none of the prefixes matched, so this line is not an extended
                 # header
-                break
-        else:
-            # we have exhausted the input, and every line was an extended
-            # header
-            line = None
-        # we have stopped parsing extended headers, either because we reached a
-        # line that was not an extended header, or because we ran out of lines
-        # first we need to validate the extended headers we have parsed
-        if 'index' not in ext_headers:
-            # TODO: index is always included, right? what other combinations
-            # are impossible?
-            raise RuntimeError('extended headers {!r} did not contain index line'.format(ext_headers))
-        # TODO: if this is not a copy or rename, we should parse the init line
-        # here to get the path that was changed
-        self[-1]['extended_headers'] = ext_headers
-        # if we've run out of lines, then that's it
-        if line is None:
-            return None, None
-        # otherwise, the next line should be the start of a standard patch
-        return self.parse_standard_headers, line
+                # the patch could just end here
+                if line.startswith('diff --git '):
+                    return self.parse_git_headers, line
+                # otherwise we have some actual changes following
+                return self.parse_standard_headers, line
+        # we have exhausted the input, and every line was an extended header
+        # this is a valid point to terminate
+        return None, None
+        # TODO: we have some cleanup to do after parsing extended headers, eg
+        # if this is not a copy/rename, we should parse the init line to get the
+        # paths
+        # TODO: what combinations of extended header are invalid? is index
+        # always present?
 
     def parse_standard_headers(self, line):
-        # if there are no more extended headers and we still have lines to
-        # parse, there are three possibilities:
-        # this could be the start of a completely new diff
-        if line.startswith('diff --git '):
-            return self.parse_git_headers, line
+        # if there are no more extended headers and we are still in the current
+        # patch, then only two possibilities remain:
         # this could be the start of a binary patch
         if line == 'GIT binary patch':
             return self.parse_binary_patch, line
