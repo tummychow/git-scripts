@@ -101,7 +101,10 @@ class DiffList(list):
         # discard the trailing newline on each input line
         self.stream = map(lambda line: desuffix(line, '\n'), stream)
         next_state = self.parse_git_headers
-        next_line = next(self.stream, None)
+        try:
+            next_line = next(self.stream)
+        except StopIteration:
+            return
         while next_state is not None:
             next_state, next_line = next_state(next_line)
 
