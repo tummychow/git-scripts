@@ -206,6 +206,9 @@ class DiffList(list):
         # literal and delta refer to the way the patch has been encoded, either
         # a binary dump of the entire file, or a diff from one version to the
         # next
+        # in either case, the data has been deflated for storage, so the length
+        # reported here will not be the same as the length of binary data that
+        # follows
         if not (line.startswith('literal ') or line.startswith('delta ')):
             raise RuntimeError('{!r} is not the start of a git binary hunk'.format(line))
         [hunk_type, hunk_length] = line.split(' ')
@@ -215,6 +218,8 @@ class DiffList(list):
         # byte of data, z means 52 bytes, etc)
         # after the length indicator are the indicated number of bytes, in
         # a custom base85 encoding (similar to zeromq base85)
+        # note that the length indicator is for the length of the deflated
+        # binary data, not the base85-encoded length
         # like zeromq's version, the input binary is interpreted in big-endian
         # 4-byte chunks, and each chunk gets encoded to 5 chars
         # however, unlike zeromq, git uses 0-9A-Za-z!#$%&()*+-;<=>?@^_`{|}~ as
