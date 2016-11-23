@@ -94,8 +94,10 @@ EXTENDED_HEADER_MAP = {
 }
 
 
-# terminology:
-# a diff is composed of multiple patches, which is composed of multiple hunks
+# a diff contains one or more patches, one for each file
+# a patch contains one or more hunks, one for each contiguous region of change
+# a hunk contains one or more blocks, one for each contiguous set of added,
+# removed or unchanged lines
 class DiffList(list):
     def __init__(self, stream):
         # discard the trailing newline on each input line
