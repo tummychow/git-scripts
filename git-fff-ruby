@@ -49,6 +49,8 @@ o, s = Open3.capture2(*get_upstream_pull)
 abort("#{get_upstream_pull.shelljoin} got #{s.exitstatus}") unless s.exitstatus == 0
 UPSTREAM_REMOTE = o.chomp
 
+# TODO: support -f flag to force-update the branch even if it's not a fast
+# forward (equivalent to putting + on the refspec)
 if TARGET_BRANCH == HEAD_BRANCH
   # fetch will refuse to update the checked out branch unless --update-head-ok
   # is passed, and even if you pass that flag, it won't actually update the
