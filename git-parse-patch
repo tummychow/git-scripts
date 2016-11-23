@@ -196,8 +196,9 @@ class DiffList(list):
         # over
         self[-1]['binary_hunks']['forward'] = self.parse_helper_binary_hunk(next(self.stream))
         # at this point, the patch could be over
-        line = next(self.stream, None)
-        if line is None:
+        try:
+            line = next(self.stream)
+        except StopIteration:
             return None, None
         if line.startswith('diff --git '):
             return self.parse_git_headers, line
@@ -207,8 +208,9 @@ class DiffList(list):
         # there cannot be more than two binary hunks in a binary patch, and
         # there can only be one binary patch per file, so at this point, the
         # patch must be over
-        line = next(self.stream, None)
-        if line is None:
+        try:
+            line = next(self.stream)
+        except StopIteration:
             return None, None
         return self.parse_git_headers, line
 
