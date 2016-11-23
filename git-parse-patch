@@ -101,11 +101,8 @@ class DiffList(list):
         # discard the trailing newline on each input line
         self.stream = map(lambda line: desuffix(line, '\n'), stream)
         next_state = self.parse_git_headers
-        try:
-            next_line = next(self.stream)
-        except StopIteration:
-            return
-        while next_state is not None:
+        next_line = next(self.stream, None)
+        while next_state is not None and next_line is not None:
             next_state, next_line = next_state(next_line)
 
     # TODO: is it convenient to invoke this with no arguments and fetch the next
@@ -151,12 +148,15 @@ class DiffList(list):
                 break
             else:
                 # none of the prefixes matched, so this line is not an extended
-                # header
-                # the patch could just end here
-                if line.startswith('diff --git '):
-                    return self.parse_git_headers, line
-                # otherwise we have some actual changes following
-                return self.parse_standard_headers, line
+                # header, and there are three possibilities:
+                # it could lead to a binary patch
+                if line == 'GIT binary patch':
+                    return self.parse_binary_patch, line
+                # it could lead to a text patch
+                if line.startswith('--- '):
+                    return self.parse_text_headers, line
+                # or the patch could just end here
+                return self.parse_git_headers, line
         # we have exhausted the input, and every line was an extended header
         # this is a valid point to terminate
         return None, None
@@ -166,26 +166,19 @@ class DiffList(list):
         # TODO: what combinations of extended header are invalid? is index
         # always present?
 
-    def parse_standard_headers(self, line):
-        # if there are no more extended headers and we are still in the current
-        # patch, then only two possibilities remain:
-        # this could be the start of a binary patch
-        if line == 'GIT binary patch':
-            return self.parse_binary_patch, line
-        # or this could be a text patch
-        if line.startswith('--- '):
-            # a text patch always has a "---" line and then a "+++" line, which
-            # can also be quoted
-            # one very important difference between these paths and the ones
-            # used in extended headers is that /dev/null will be used here for
-            # creations/deletions
-            # TODO: ignore these lines in favor of the lines parsed from the
-            # headers earlier (these would be omitted if the patch was empty)
-            self[-1]['before_path'] = parse_helper_quoted_filename(deprefix(line, '--- ', check=True))
-            self[-1]['after_path'] = parse_helper_quoted_filename(deprefix(next(self.stream), '+++ ', check=True))
-            self[-1]['text_hunks'] = []
-            # there must be at least one hunk following this header
-            return self.parse_text_hunk, next(self.stream)
+    def parse_text_headers(self, line):
+        # a text patch always has a "---" line and then a "+++" line, which can
+        # also be quoted
+        # one very important difference between these paths and the ones used in
+        # extended headers is that /dev/null will be used here for creations and
+        # deletions
+        # TODO: ignore these lines in favor of the lines parsed from the headers
+        # earlier (these would be omitted if the patch was empty)
+        self[-1]['before_path'] = parse_helper_quoted_filename(deprefix(line, '--- ', check=True))
+        self[-1]['after_path'] = parse_helper_quoted_filename(deprefix(next(self.stream), '+++ ', check=True))
+        self[-1]['text_hunks'] = []
+        # there must be at least one hunk following this header
+        return self.parse_text_hunk, next(self.stream)
 
     def parse_binary_patch(self, line):
         # git starts a binary patch using this special header line
@@ -195,23 +188,14 @@ class DiffList(list):
         # a binary patch is always followed by one binary hunk, which we skip
         # over
         self[-1]['binary_hunks']['forward'] = self.parse_helper_binary_hunk(next(self.stream))
-        # at this point, the patch could be over
-        try:
-            line = next(self.stream)
-        except StopIteration:
-            return None, None
-        if line.startswith('diff --git '):
-            return self.parse_git_headers, line
-        # or it could contain another binary hunk, which is the inverse of the
-        # first one
-        self[-1]['binary_hunks']['backward'] = self.parse_helper_binary_hunk(line)
-        # there cannot be more than two binary hunks in a binary patch, and
-        # there can only be one binary patch per file, so at this point, the
-        # patch must be over
-        try:
-            line = next(self.stream)
-        except StopIteration:
-            return None, None
+        # after the first binary hunk, there could be a second, which is the
+        # reverse of the first one
+        line = next(self.stream, None)
+        if line is not None and (line.startswith('literal ') or line.startswith('delta ')):
+            self[-1]['binary_hunks']['backward'] = self.parse_helper_binary_hunk(line)
+            line = next(self.stream, None)
+        # there might have been one hunk, or two hunks, but there can't be any
+        # more, so this must be the end of the patch
         return self.parse_git_headers, line
 
     def parse_helper_binary_hunk(self, line):
@@ -350,11 +334,11 @@ class DiffList(list):
             return None, None
         # if we got to here, then we must have broken out of hunk processing
         # because we counted all the lines in the hunk
-        # this could be the end of the whole patch
-        if line.startswith('diff --git '):
-            return self.parse_git_headers, line
-        # otherwise it must be followed by another hunk
-        return self.parse_text_hunk, line
+        # there could be another hunk here
+        if line.startswith('@@'):
+            return self.parse_text_hunk, line
+        # otherwise the whole patch is over
+        return self.parse_git_headers, line
 
 
 import sys
