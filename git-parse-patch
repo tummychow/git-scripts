@@ -335,6 +335,8 @@ class DiffList(list):
                     'ending_newline': True,
                 })
             # keep track of the lines
+            # note that, since we are counting the lines in the hunk, we expect
+            # every single one of these to be valid content for the hunk
             if line_type == ' ':
                 before_seen += 1
                 after_seen += 1
@@ -342,19 +344,13 @@ class DiffList(list):
                 before_seen += 1
             elif line_type == '+':
                 after_seen += 1
-            else:
-                # none of the possible line types, the hunk must have ended
-                break
             blocks[-1]['lines'].append(rest_of_line)
         else:
-            # we have exhausted the input and all of it was for this hunk
-            # TODO: similar termination condition to parse_git_headers
-            line = None
-        # the end of a hunk could be the end of the entire patch
-        # TODO: this code is very similar to what we do when we've parsed a
-        # binary patch, is there a way to factor this out?
-        if line is None:
+            # we exhausted the input stream
             return None, None
+        # if we got to here, then we must have broken out of hunk processing
+        # because we counted all the lines in the hunk
+        # this could be the end of the whole patch
         if line.startswith('diff --git '):
             return self.parse_git_headers, line
         # otherwise it must be followed by another hunk
