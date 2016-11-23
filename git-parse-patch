@@ -275,33 +275,39 @@ class DiffList(list):
             line_type = line[0]
             rest_of_line = line[1:]
             if not blocks:
-                # the first block will never be a no-newline indicator, so the
-                # line_type is always one of " +-"
+                # the first line is never a no-newline indicator, so we don't
+                # have to worry about line_type being a backslash here
                 blocks.append({
                     'type': line_type,
                     'lines': [],
                     'ending_newline': True,
                 })
             current_type = blocks[-1]['type']
+            # no-newline indicator found for this block
+            # no-newline indicators do not count towards the hunk lines, so we
+            # do this part before checking line counts
+            # (for example, a no-newline indicator could be attached to the
+            # very last line in a hunk)
             if line_type == '\\':
                 # if we already saw a no-newline indicator for this block, we
                 # can't have another one
                 if not blocks[-1]['ending_newline']:
                     raise RuntimeError('two no-newline indicators found for current block {!r}'.format(blocks[-1]))
-                # no-newline indicator found for this block
                 blocks[-1]['ending_newline'] = False
                 continue
             # if all the lines in the hunk are accounted for, then this is not
             # a hunk line, so break out
-            # note that we intentionally perform this check after the no-newline
-            # indicator check, because even if all the lines have been counted,
-            # there might be a no-newline indicator attached to the end
             if before_seen > before['count'] or after_seen > after['count']:
                 raise RuntimeError('found more before/after lines than expected ({}>{} || {}>{})'.format(before_seen, before['count'], after_seen, after['count']))
             if before_seen == before['count'] and after_seen == after['count']:
                 break
-            if line_type != current_type or not blocks[-1]['ending_newline']:
-                # we are entering a new block type
+            # by definition, a no-newline indicator terminates the block, so the
+            # line's type must not continue the block that was terminated
+            if not blocks[-1]['ending_newline']:
+                if line_type == current_type:
+                    raise RuntimeError('line {!r} continues a block that was terminated by a no-newline indicator'.format(line))
+            # the previous block has ended and we need to start a new one
+            if line_type != current_type:
                 # context blocks can transition to before or after blocks, and
                 # before blocks can transition to context or after blocks
                 if current_type == '+':
@@ -310,15 +316,12 @@ class DiffList(list):
                     # (this prevents cases of before->after->before->after)
                     if line_type == '-':
                         raise RuntimeError('transitioning from after block {!r} to before line {!r} is illegal'.format(blocks[-1], line))
-                # the transition is valid, so we initialize the new block
                 blocks.append({
                     'type': line_type,
                     'lines': [],
                     'ending_newline': True,
                 })
             # keep track of the lines
-            # note that, since we are counting the lines in the hunk, we expect
-            # every single one of these to be valid content for the hunk
             if line_type == ' ':
                 before_seen += 1
                 after_seen += 1
@@ -326,6 +329,8 @@ class DiffList(list):
                 before_seen += 1
             elif line_type == '+':
                 after_seen += 1
+            else:
+                raise RuntimeError('line {!r} unexpected in incomplete hunk'.format(line))
             blocks[-1]['lines'].append(rest_of_line)
         else:
             # we exhausted the input stream
