@@ -41,7 +41,7 @@ def parse_helper_quoted_filename(filename):
 
 
 def parse_helper_similarity(similarity_percent):
-    return int(deprefix(similarity_percent, '%', check=True))
+    return int(desuffix(similarity_percent, '%', check=True))
 
 
 def parse_helper_index_header(index):
@@ -192,9 +192,10 @@ class DiffList(list):
         # git starts a binary patch using this special header line
         if line != 'GIT binary patch':
             raise RuntimeError('{!r} is not the header of a git binary patch'.format(line))
+        self[-1]['binary_hunks'] = {}
         # a binary patch is always followed by one binary hunk, which we skip
         # over
-        self.parse_binary_hunk(next(self.stream))
+        self[-1]['binary_hunks']['forward'] = self.parse_helper_binary_hunk(next(self.stream))
         # at this point, the patch could be over
         line = next(self.stream, None)
         if line is None:
@@ -203,14 +204,16 @@ class DiffList(list):
             return self.parse_git_headers, line
         # or it could contain another binary hunk, which is the inverse of the
         # first one
-        self.parse_binary_hunk(line)
+        self[-1]['binary_hunks']['backward'] = self.parse_helper_binary_hunk(line)
         # there cannot be more than two binary hunks in a binary patch, and
         # there can only be one binary patch per file, so at this point, the
         # patch must be over
-        return None, None
+        line = next(self.stream, None)
+        if line is None:
+            return None, None
+        return self.parse_git_headers, line
 
-    # TODO: this should be a parser helper
-    def parse_binary_hunk(self, line):
+    def parse_helper_binary_hunk(self, line):
         # a binary hunk starts with the word "literal" or "delta", then the
         # number of uncompressed bytes in the patch
         # literal and delta refer to the way the patch has been encoded, either
@@ -240,6 +243,10 @@ class DiffList(list):
                 break
         else:
             raise RuntimeError('could not find empty line terminator in binary hunk')
+        return {
+            'type': hunk_type,
+            'len': int(hunk_length),
+        }
 
     def parse_text_hunk(self, line):
         # a text hunk always starts with a header of the form
@@ -253,6 +260,12 @@ class DiffList(list):
             raise RuntimeError('{!r} is not a hunk header, line counts should start with -+'.format(line))
         before = parse_helper_hunk_count(before)
         after = parse_helper_hunk_count(after)
+        blocks = []
+        self[-1]['text_hunks'].append({
+            'before': before,
+            'after': after,
+            'sections': blocks,
+        })
         # after a hunk header, we have the actual hunk lines
         # the lines fall into three categories:
         # context (starting with a space)
@@ -269,128 +282,82 @@ class DiffList(list):
         # line must itself be the end of the hunk
         before_seen = 0
         after_seen = 0
-        while before_seen < before['count'] or after_seen < after['count']:
-            # TODO: actually implement the hunk line state machine
-            line = next(self.stream)
-            if line.startswith(' '):
+        for line in self.stream:
+            if not line:
+                raise RuntimeError('empty line found in text hunk')
+            line_type = line[0]
+            rest_of_line = line[1:]
+            if not blocks:
+                # the first block will never be a no-newline indicator, so the
+                # line_type is always one of " +-"
+                blocks.append({
+                    'type': line_type,
+                    'lines': [],
+                    'ending_newline': True,
+                })
+            current_type = blocks[-1]['type']
+            if line_type == '\\':
+                # if we already saw a no-newline indicator for this block, we
+                # can't have another one
+                if not blocks[-1]['ending_newline']:
+                    raise RuntimeError('two no-newline indicators found for current block {!r}'.format(blocks[-1]))
+                # no-newline indicator found for this block
+                blocks[-1]['ending_newline'] = False
+                continue
+            # if all the lines in the hunk are accounted for, then terminate
+            # note that we intentionally perform this check after the no-newline
+            # indicator check, because even if all the lines have been counted,
+            # there might be a no-newline indicator attached to the end
+            if before_seen >= before['count'] and after_seen >= after['count']:
+                break
+            if line_type != current_type or not blocks[-1]['ending_newline']:
+                # we are entering a new block type
+                if current_type == ' ':
+                    # from a context block, we can transition to a before/after
+                    # block, or the hunk could end
+                    # but there is one exception: a hunk cannot consist of just
+                    # one context block on its own
+                    if len(blocks) == 1 and line_type != '-' and line_type != '+':
+                        raise RuntimeError('there is only one block in {!r}'.format(blocks))
+                elif current_type == '-':
+                    # from a before block, we can transition anywhere
+                    pass
+                elif current_type == '+':
+                    # from an after block, we cannot go to a before block, but
+                    # other stuff is possible
+                    if line_type == '-':
+                        raise RuntimeError('transitioning from after block {!r} to before line {!r} is illegal'.format(blocks[-1], line))
+                # the transition is valid, so we initialize the new block
+                blocks.append({
+                    'type': line_type,
+                    'lines': [],
+                    'ending_newline': True,
+                })
+            # keep track of the lines
+            if line_type == ' ':
                 before_seen += 1
                 after_seen += 1
-            elif line.startswith('-'):
+            elif line_type == '-':
                 before_seen += 1
-            elif line.startswith('+'):
+            elif line_type == '+':
                 after_seen += 1
-            elif line == '\ No newline at end of file':
-                pass
             else:
-                raise RuntimeError('{!r} not expected in hunk'.format(line))
-        # the end of a hunk could also be the end of the entire patch
+                # none of the possible line types, the hunk must have ended
+                break
+            blocks[-1]['lines'].append(rest_of_line)
+        else:
+            # we have exhausted the input and all of it was for this hunk
+            # TODO: similar termination condition to parse_git_headers
+            line = None
+        # the end of a hunk could be the end of the entire patch
         # TODO: this code is very similar to what we do when we've parsed a
         # binary patch, is there a way to factor this out?
-        line = next(self.stream, None)
         if line is None:
             return None, None
         if line.startswith('diff --git '):
             return self.parse_git_headers, line
         # otherwise it must be followed by another hunk
         return self.parse_text_hunk, line
-
-
-# TODO: we use a dict so that we don't have to define __repr__, but we should
-# probably define a proper class
-class RawPatch(dict):
-    def __init__(self, stream):
-        self['patches'] = []
-        # discard the trailing newlines on the input lines
-        self.stream = map(lambda line: line[:-1], stream)
-        next_state = self.parse_header_first
-        next_line = next(self.stream)
-        while next_line is not None:
-            next_state, next_line = next_state(next_line)
-        self.clean()
-
-    def cur_patch(self):
-        return self['patches'][-1]
-
-    def cur_hunk(self):
-        return self.cur_patch()['hunks'][-1]
-
-    def parse_header_first(self, line):
-        if not line.startswith('diff --git '):
-            raise RuntimeError('{!r} is not a git patch header'.format(line))
-        self['patches'].append({
-            'header': line,
-            'extended': {},
-            'hunks': [],
-        })
-        return self.parse_extended_headers, next(self.stream)
-
-    def parse_extended_headers(self, line):
-        for prefix, line_parser in EXTENDED_HEADER_MAP.items():
-            try:
-                rest_of_line = deprefix(line, prefix + ' ', check=True)
-            except RuntimeError:
-                continue
-            if callable(line_parser):
-                rest_of_line = line_parser(rest_of_line)
-            if prefix in self.cur_patch()['extended']:
-                raise RuntimeError('already parsed extended header {!r} to {!r}, cannot set to {!r}'.format(prefix, self.cur_patch()['extended'][prefix], rest_of_line))
-            self.cur_patch()['extended'][prefix] = rest_of_line
-            return self.parse_extended_headers, next(self.stream)
-        return self.parse_hunk_header, line
-
-    def parse_hunk_header(self, line):
-        if line == 'GIT binary patch':
-            self.cur_patch()['binary'] = {}
-            return self.parse_skip_binary_patch, next(self.stream)
-        [hunk_start, before_lines, after_lines, hunk_end] = line.split(' ', maxsplit=3)
-        if not (hunk_start == '@@' and hunk_end.startswith('@@') and before_lines.startswith('-') and after_lines.startswith('+')):
-            raise RuntimeError('{!r} is not a hunk header'.format(line))
-        self.cur_patch()['hunks'].append({
-            'before': parse_helper_hunk_count(before_lines),
-            'after': parse_helper_hunk_count(after_lines),
-            'lines': [],
-            'header': '' if hunk_end == '@@' else deprefix(hunk_end, '@@ '),
-        })
-        return self.parse_diff_lines, next(self.stream)
-
-    def parse_diff_lines(self, line):
-        if line[0] in '+- \\':
-            self.cur_hunk()['lines'].append({
-                'type': line[0],
-                'line': line[1:],
-            })
-            return self.parse_diff_lines, next(self.stream, None)
-        if line[0] == '@':
-            return self.parse_hunk_header, line
-        if line[0] == 'd':
-            return self.parse_header_first, line
-        raise RuntimeError('{!r} starts with an unexpected character'.format(line))
-
-    def parse_skip_binary_patch(self, line):
-        if line.startswith('literal ') or line.startswith('delta '):
-            [forward_type, forward_bytes] = line.split(' ')
-            self.cur_patch()['binary']['forward'] = {
-                'type': forward_type,
-                'bytes': int(forward_bytes),
-            }
-            for line in self.stream:
-                if line == '':
-                    break
-            line = next(self.stream)
-            if line.startswith('literal ') or line.startswith('delta '):
-                [backward_type, backward_bytes] = line.split(' ')
-                self.cur_patch()['binary']['backward'] = {
-                    'type': backward_type,
-                    'bytes': int(backward_bytes),
-                }
-                for line in self.stream:
-                    if line == '':
-                        break
-            return self.parse_header_first, next(self.stream, None)
-        raise RuntimeError('{!r} is not a binary hunk header'.format(line))
-
-    def clean(self):
-        pass
 
 
 import sys
