@@ -431,7 +431,9 @@ at this point, we're mostly back into the territory of standard unified diffs. t
 +++ <file2>
 ```
 
-the filenames used here obey the same rules as the ones in the first line - they have the `a/` and `b/` prefixes, they'll be quoted and backslash-escaped if they contain unexpected characters, etc. because each of these lines contains only one filename, they're pretty easy to parse. but remember, if the file didn't have any lines changed, these lines (and everything after them) will be omitted! so adding/removing empty files, or just modifying file modes, will not include these lines. you'll have to resort to parsing the first line in that case.
+the filenames used here obey the same rules as the ones in the first line - they have the `a/` and `b/` prefixes, they'll be quoted and backslash-escaped if they contain unexpected characters, etc - but with one very important caveat. for creations and deletions, `/dev/null` will be used here, where as in the other headers, `/dev/null` will never appear.
+
+because each of these lines contains only one filename, they're pretty easy to parse. but remember, if the file didn't have any lines changed, these lines (and everything after them) will be omitted! so adding/removing empty files, or just modifying file modes, will not include these lines. you'll have to resort to parsing the first line in that case.
 
 ## hunk header
 

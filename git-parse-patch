@@ -180,6 +180,9 @@ class DiffList(list):
         if line.startswith('--- '):
             # a text patch always has a "---" line and then a "+++" line, which
             # can also be quoted
+            # one very important difference between these paths and the ones
+            # used in extended headers is that /dev/null will be used here for
+            # creations/deletions
             # TODO: ignore these lines in favor of the lines parsed from the
             # headers earlier (these would be omitted if the patch was empty)
             self[-1]['before_path'] = parse_helper_quoted_filename(deprefix(line, '--- ', check=True))
