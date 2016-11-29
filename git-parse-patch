@@ -360,12 +360,8 @@ class DiffList(list):
 
 
 import sys
-import json
-class ByteEncoder(json.JSONEncoder):
-    def default(self, o):
-        if isinstance(o, bytes) or isinstance(o, bytearray):
-            return o.decode(sys.stdin.encoding, 'replace')
-        return json.JSONEncoder(self, o)
+import pprint
+import shutil
 
 STREAM = sys.stdin.buffer
 if len(sys.argv) > 1:
@@ -398,4 +394,10 @@ if len(sys.argv) > 1:
     # the top, so we skip that part
     next(STREAM, None)
 
-print(ByteEncoder(indent=4).encode(DiffList(STREAM)))
+pprint.pprint(
+    DiffList(STREAM),
+    indent=4,
+    width=shutil.get_terminal_size(
+        fallback=(80, 40)
+    ).columns,
+)
