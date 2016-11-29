@@ -366,4 +366,36 @@ class ByteEncoder(json.JSONEncoder):
         if isinstance(o, bytes) or isinstance(o, bytearray):
             return o.decode(sys.stdin.encoding, 'replace')
         return json.JSONEncoder(self, o)
-print(ByteEncoder(indent=4).encode(DiffList(sys.stdin.buffer)))
+
+STREAM = sys.stdin.buffer
+if len(sys.argv) > 1:
+    CMD = [
+        'git',
+        '--no-pager',
+        'diff-tree',
+        sys.argv[1],
+        # actually display a patch
+        '--patch',
+        # disable all color
+        '--no-color',
+        # disable all external diffing helpers
+        '--no-ext-diff',
+        # disable all gitattributes text conversion
+        '--no-textconv',
+        # disable word-level diff splitting
+        '--word-diff=none',
+        # expose the entire 40-char blob SHA1 in the index extended header
+        '--full-index',
+        # make git print the entire binary hunk rather than just the
+        # 'Binary files <> and <> differ' indicator
+        '--binary',
+    ]
+    # pass any remaining args (eg -U0, -C, -M) to diff-tree
+    CMD.extend(sys.argv[2:])
+    import subprocess
+    STREAM = subprocess.Popen(CMD, stdout=subprocess.PIPE, universal_newlines=False).stdout
+    # when invoked with a single commit, diff-tree prints the commit's SHA at
+    # the top, so we skip that part
+    next(STREAM, None)
+
+print(ByteEncoder(indent=4).encode(DiffList(STREAM)))
