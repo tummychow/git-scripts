@@ -19,13 +19,14 @@ def desuffix(val, suffix, check=False):
 def parse_helper_mode_header(mode):
     # git does not preserve all file permission bits, it only knows of four
     # possible modes
-    if mode == '100644':
+    mode = int(mode)
+    if mode == 100644:
         return 'regular'
-    if mode == '100755':
+    if mode == 100755:
         return 'executable'
-    if mode == '120000':
+    if mode == 120000:
         return 'symlink'
-    if mode == '160000':
+    if mode == 160000:
         return 'submodule'
     raise RuntimeError('{!r} is not a recognized mode'.format(mode))
 
@@ -42,7 +43,7 @@ def parse_helper_quoted_filename(filename):
 
 
 def parse_helper_similarity(similarity_percent):
-    return int(desuffix(similarity_percent, '%', check=True))
+    return int(desuffix(similarity_percent.decode('ascii'), '%', check=True))
 
 
 def parse_helper_index_header(index):
@@ -51,7 +52,7 @@ def parse_helper_index_header(index):
     # the index header will then have the mode, if it was unchanged
     # if the mode was changed, then the index header will omit it, and other
     # headers will indicate the changes that applied there
-    index_split = index.split(' ')
+    index_split = index.decode('ascii').split(' ')
     [blob_old, blob_new] = index_split[0].split('..')
     if len(index_split) == 1:
         mode = ''
@@ -72,7 +73,7 @@ def parse_helper_hunk_count(hunk_count):
     # the first number is the start line of that side of the hunk, and the
     # second number is the number of lines that side spans
     # the comma and the count may be omitted if the hunk spans exactly one line
-    numbers = hunk_count[1:].split(',')
+    numbers = hunk_count[1:].decode('ascii').split(',')
     if len(numbers) == 1:
         return {'start': int(numbers[0]), 'count': 1}
     if len(numbers) == 2:
@@ -102,7 +103,7 @@ EXTENDED_HEADER_MAP = {
 class DiffList(list):
     def __init__(self, stream):
         # discard the trailing newline on each input line
-        self.stream = map(lambda line: desuffix(line, '\n'), stream)
+        self.stream = map(lambda line: desuffix(line, b'\n'), stream)
         next_state = self.parse_git_headers
         next_line = next(self.stream, None)
         while next_state is not None and next_line is not None:
@@ -125,7 +126,7 @@ class DiffList(list):
         # however, spaces will NOT be backslash escaped, so you can't reliably
         # parse the filenames in this line unless you know they're the same (in
         # which case you would also know they had the same length)
-        if not line.startswith('diff --git '):
+        if not line.startswith(b'diff --git '):
             raise RuntimeError('{!r} is not a git patch header'.format(line))
         ext_headers = {}
         self.append({
@@ -140,7 +141,7 @@ class DiffList(list):
         for line in self.stream:
             for prefix, line_parser in EXTENDED_HEADER_MAP.items():
                 try:
-                    rest_of_line = deprefix(line, prefix + ' ', check=True)
+                    rest_of_line = deprefix(line, prefix.encode('ascii') + b' ', check=True)
                 except RuntimeError:
                     continue
                 if callable(line_parser):
@@ -153,10 +154,10 @@ class DiffList(list):
                 # none of the prefixes matched, so this line is not an extended
                 # header, and there are three possibilities:
                 # it could lead to a binary patch
-                if line == 'GIT binary patch':
+                if line == b'GIT binary patch':
                     return self.parse_binary_patch, line
                 # it could lead to a text patch
-                if line.startswith('--- '):
+                if line.startswith(b'--- '):
                     return self.parse_text_headers, line
                 # or the patch could just end here
                 return self.parse_git_headers, line
@@ -177,15 +178,15 @@ class DiffList(list):
         # deletions
         # TODO: ignore these lines in favor of the lines parsed from the headers
         # earlier (these would be omitted if the patch was empty)
-        self[-1]['before_path'] = parse_helper_quoted_filename(deprefix(line, '--- ', check=True))
-        self[-1]['after_path'] = parse_helper_quoted_filename(deprefix(next(self.stream), '+++ ', check=True))
+        self[-1]['before_path'] = parse_helper_quoted_filename(deprefix(line, b'--- ', check=True))
+        self[-1]['after_path'] = parse_helper_quoted_filename(deprefix(next(self.stream), b'+++ ', check=True))
         self[-1]['text_hunks'] = []
         # there must be at least one hunk following this header
         return self.parse_text_hunk, next(self.stream)
 
     def parse_binary_patch(self, line):
         # git starts a binary patch using this special header line
-        if line != 'GIT binary patch':
+        if line != b'GIT binary patch':
             raise RuntimeError('{!r} is not the header of a git binary patch'.format(line))
         self[-1]['binary_hunks'] = {}
         # a binary patch is always followed by one binary hunk, which we skip
@@ -194,7 +195,7 @@ class DiffList(list):
         # after the first binary hunk, there could be a second, which is the
         # reverse of the first one
         line = next(self.stream, None)
-        if line is not None and (line.startswith('literal ') or line.startswith('delta ')):
+        if line is not None and (line.startswith(b'literal ') or line.startswith(b'delta ')):
             self[-1]['binary_hunks']['backward'] = self.parse_helper_binary_hunk(line)
             line = next(self.stream, None)
         # there might have been one hunk, or two hunks, but there can't be any
@@ -210,6 +211,7 @@ class DiffList(list):
         # in either case, the data has been deflated for storage, so the length
         # reported here will not be the same as the length of binary data that
         # follows
+        line = line.decode('ascii')
         if not (line.startswith('literal ') or line.startswith('delta ')):
             raise RuntimeError('{!r} is not the start of a git binary hunk'.format(line))
         [hunk_type, hunk_length] = line.split(' ')
@@ -232,7 +234,7 @@ class DiffList(list):
             # the base85 data is terminated by an empty line
             # since we don't care about the actual data, we just skip until we
             # find that line
-            if line == '':
+            if len(line) == 0:
                 break
         else:
             raise RuntimeError('could not find empty line terminator in binary hunk')
@@ -244,12 +246,12 @@ class DiffList(list):
     def parse_text_hunk(self, line):
         # a text hunk always starts with a header of the form
         # @@ <before_lines> <after_lines> @@ <optional context>
-        [start, before, after, end] = line.split(' ', maxsplit=3)
-        if not (start == '@@' and end.startswith('@@')):
+        [start, before, after, end] = line.split(b' ', maxsplit=3)
+        if not (start == b'@@' and end.startswith(b'@@')):
             raise RuntimeError('{!r} is not a hunk header, missing @@ delimiters'.format(line))
         # the before count starts with a "-", and the after count starts with a
         # "+"
-        if not (before.startswith('-') and after.startswith('+')):
+        if not (before.startswith(b'-') and after.startswith(b'+')):
             raise RuntimeError('{!r} is not a hunk header, line counts should start with -+'.format(line))
         before = parse_helper_hunk_count(before)
         after = parse_helper_hunk_count(after)
@@ -278,7 +280,7 @@ class DiffList(list):
         for line in self.stream:
             if not line:
                 raise RuntimeError('empty line found in text hunk')
-            line_type = line[0]
+            line_type = line[:1].decode('ascii')
             rest_of_line = line[1:]
             if not blocks:
                 # the first line is never a no-newline indicator, so we don't
@@ -351,7 +353,7 @@ class DiffList(list):
         if all(map(lambda block: block['type'] == ' ', blocks)):
             raise RuntimeError('hunk consists entirely of context blocks {!r}'.format(blocks))
         # there could be another hunk here
-        if line.startswith('@@'):
+        if line.startswith(b'@@'):
             return self.parse_text_hunk, line
         # otherwise the whole patch is over
         return self.parse_git_headers, line
@@ -359,4 +361,9 @@ class DiffList(list):
 
 import sys
 import json
-print(json.dumps(DiffList(sys.stdin), indent=4))
+class ByteEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, bytes) or isinstance(o, bytearray):
+            return o.decode(sys.stdin.encoding, 'replace')
+        return json.JSONEncoder(self, o)
+print(ByteEncoder(indent=4).encode(DiffList(sys.stdin.buffer)))
