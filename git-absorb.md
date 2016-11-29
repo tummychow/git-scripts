@@ -313,6 +313,7 @@ invoke('git', 'log', '{}^..{}'.format(commit_stack[-1]['commit'], commit_stack[0
 - if file A is copied to file B, does a patch on file A commute backwards past the copy? even though A itself was not modified by the copy, we could argue that later patches to A cannot commute with the copy since they would have affected the copy. in this case we would have to perform copy resolution
 - symbolic refs for locking to protect against multiple git absorbs being run at once
 - to create a partial commit, we would need to patch a tempfile, git-hash-object -w to create a blob for that file, git-mktree to incorporate the blob into a tree object, git-commit-tree to wrap the tree into a commit object, git-update-ref to update a branch with that commit object and reflog it as appropriate
+- remember to drop commits that become empty after absorption (autosquash would do this for us automatically)
 
 ---
 
