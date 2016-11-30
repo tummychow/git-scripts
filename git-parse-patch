@@ -381,6 +381,8 @@ if len(sys.argv) > 1:
         '--no-textconv',
         # disable word-level diff splitting
         '--word-diff=none',
+        # display submodules in the "Subproject commit" format
+        '--submodule=short',
     ]
     # pass any remaining args to diff-tree
     # useful flags to try:

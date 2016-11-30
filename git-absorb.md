@@ -539,6 +539,14 @@ $ git cat-file -p "$(git rev-parse HEAD)^{tree}"
 
 it turns out that the tree in the parent repository directly references the commit of the child repository. (i believe this is the only time a tree can reference commits, as opposed to blobs or other trees.) the special mode 160000 indicates that this is a gitlink, and that the sha does not exist in the parent repository at all.
 
+what's described above is the default format, `short`, but you can adjust this with the `--submodule` flag. with `log`, git will compare the commit logs of the subproject before and after the change. the format is based on `git submodule summary` and it's reminiscent of rev-list's left/right functionality. with `diff`, git will actually compare the trees of the submodules. using either of these formats complicates the matter considerably - git will denote the submodule-related patches with a special header looking like this:
+
+```
+Submodule foo 0000000...543785e (new submodule)
+```
+
+there are other suffixes for a submodule that went backwards `(rewind)` or was removed `(submodule deleted)`. if you use `diff` format, you would have to identify which patches belonged to the submodule by their paths. in our case we strongly prefer the `short` format, because it minimizes parser effort and the additional information is not meaningful to git absorb.
+
 # applying hunks
 
 applying a hunk is fundamentally not that hard of a process. the reason for this is that a hunk is, by definition, contiguous - there may be unchanged lines at the start and end, but there are never any in the middle, or you'd have two separate hunks. (git may have reported multiple hunks as one, but if you parsed them correctly, then they should be split back up.) the method looks like this:
