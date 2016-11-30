@@ -27,7 +27,7 @@ def parse_helper_mode_header(mode):
     if mode == 120000:
         return 'symlink'
     if mode == 160000:
-        return 'submodule'
+        return 'gitlink'
     raise RuntimeError('{!r} is not a recognized mode'.format(mode))
 
 

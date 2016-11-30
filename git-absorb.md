@@ -507,6 +507,38 @@ fortunately for us, we don't have to worry about parsing binary diffs, since we 
 
 note that git does not allow more than one `GIT binary patch` per `diff --git`. they have a one-to-one correspondence. so once you finish parsing the one or two binary hunks, you are back to the diff header.
 
+## subprojects
+
+the concept of "submodule" is higher-level than what git diffs care about (basically the gitmodules file and remote mappings). the lowest level of representation is a subproject, or as git's own code refers to it, a gitlink - a repository within a repository.
+
+gitlinks are denoted by the special mode 160000 and git doesn't store any information about them except the commit sha1 that the linked repository is currently on. this results in patches like this:
+
+```diff
+diff --git a/foo b/foo
+deleted file mode 100644
+index 257cc56..0000000
+--- a/foo
++++ /dev/null
+@@ -1 +0,0 @@
+-foo
+diff --git a/foo b/foo
+new file mode 160000
+index 0000000..6660a14
+--- /dev/null
++++ b/foo
+@@ -0,0 +1 @@
++Subproject commit 6660a14ace2320fca4df4326b2d6cd9d508e5532
+```
+
+this patch tells us a lot about how git handles subprojects. first, you can see that git does not report old mode and new mode when you change a file into a subproject. it always treats it as a separate deletion and creation. you can also see that, if git has to report a diff of a subproject, it creates a temporary blob with the words "Subproject commit" to use as the diff text. most interestingly, the index header shows the actual commit shas of the subproject. why is that?
+
+```bash
+$ git cat-file -p "$(git rev-parse HEAD)^{tree}"
+160000 commit 6660a14ace2320fca4df4326b2d6cd9d508e5532  foo
+```
+
+it turns out that the tree in the parent repository directly references the commit of the child repository. (i believe this is the only time a tree can reference commits, as opposed to blobs or other trees.) the special mode 160000 indicates that this is a gitlink, and that the sha does not exist in the parent repository at all.
+
 # applying hunks
 
 applying a hunk is fundamentally not that hard of a process. the reason for this is that a hunk is, by definition, contiguous - there may be unchanged lines at the start and end, but there are never any in the middle, or you'd have two separate hunks. (git may have reported multiple hunks as one, but if you parsed them correctly, then they should be split back up.) the method looks like this:
