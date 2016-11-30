@@ -373,7 +373,6 @@ if len(sys.argv) > 1:
         'git',
         '--no-pager',
         'diff-tree',
-        sys.argv[1],
         # actually display a patch
         '--patch',
         # disable all color
@@ -384,16 +383,27 @@ if len(sys.argv) > 1:
         '--no-textconv',
         # disable word-level diff splitting
         '--word-diff=none',
-        # expose the entire 40-char blob SHA1 in the index extended header
-        '--full-index',
     ]
-    # pass any remaining args (eg -U0, -C, -M) to diff-tree
-    CMD.extend(sys.argv[2:])
+    # pass any remaining args to diff-tree
+    # useful flags to try:
+    # -M, --find-renames, --no-renames
+    # -C, --find-copies, --find-copies-harder
+    # -l
+    # -B, --break-rewrites
+    # -D, --irreversible-delete
+    # -U, --unified
+    # --diff-algorithm
+    # --diff-filter
+    # --full-index
+    # --binary
+    # -S
+    # -G
+    # -O
+    # --src-prefix, --dst-prefix, --no-prefix
+    # --root
+    CMD.extend(sys.argv[1:])
     import subprocess
     STREAM = subprocess.Popen(CMD, stdout=subprocess.PIPE, universal_newlines=False).stdout
-    # when invoked with a single commit, diff-tree prints the commit's SHA at
-    # the top, so we skip that part
-    next(STREAM, None)
 
 pprint.pprint(
     DiffList(STREAM),
