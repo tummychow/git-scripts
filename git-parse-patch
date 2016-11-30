@@ -156,6 +156,10 @@ class DiffList(list):
                 # it could lead to a binary patch
                 if line == b'GIT binary patch':
                     return self.parse_binary_patch, line
+                # it could lead to an elided binary patch (if you omit --binary)
+                if line.startswith(b'Binary files ') and line.endswith(b' differ'):
+                    self[-1]['binary_hunks'] = {'elided': True}
+                    return self.parse_git_headers, next(self.stream, None)
                 # it could lead to a text patch
                 if line.startswith(b'--- '):
                     return self.parse_text_headers, line
@@ -382,9 +386,6 @@ if len(sys.argv) > 1:
         '--word-diff=none',
         # expose the entire 40-char blob SHA1 in the index extended header
         '--full-index',
-        # make git print the entire binary hunk rather than just the
-        # 'Binary files <> and <> differ' indicator
-        '--binary',
     ]
     # pass any remaining args (eg -U0, -C, -M) to diff-tree
     CMD.extend(sys.argv[2:])
