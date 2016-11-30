@@ -109,8 +109,6 @@ class DiffList(list):
         while next_state is not None and next_line is not None:
             next_state, next_line = next_state(next_line)
 
-    # TODO: is it convenient to invoke this with no arguments and fetch the next
-    # line from here by default?
     def parse_git_headers(self, line):
         # a git patch starts with "diff --git <file1> <file2>"
         # <file1> and <file2> start with "a/" and "b/" prefixes, respectively
