@@ -266,7 +266,7 @@ consolidating these rules, we find that absorb is only interested in the text-to
 
 what paths are "affected" by absorb? the ones containing diffs that we want to absorb, ie the paths that have been modified between HEAD and the index. let's look at a single diff spec from `git status -z` or `git diff --name-status -z` and the possible categories of output. (all repro examples are in an empty folder in which we have run `git init && touch foo && git add foo && git commit -m init`.)
 
-it's important to note that `git status -z` does not support all the features of `--name-status`, as discussed [here](https://marc.info/?l=git&m=141750335305994&w=2). in particular, it does not support copy detection, so although it is documented to return `C` codes, it never actually will. for best results, you should usually check the output of `git diff --name-status --find-copies-harder`, with and without `--cached`.
+it's important to note that `git status -z` does not support all the features of `--name-status`, as discussed [here](https://marc.info/?l=git&m=141750335305994&w=2). in particular, it does not support copy detection, so although it is documented to return `C` codes, it never actually will. for best results, you should usually use `--name-status` with a plumbing diff command (diff-tree, diff-index, or diff-files).
 
 output | HEAD..index | index..worktree | repro example
 --- | --- | --- | ---
@@ -289,23 +289,43 @@ output | HEAD..index | index..worktree | repro example
 `CD` | copied | deleted | `cp foo bar && git add bar && rm bar`
 `??` | untracked | untracked | `touch bar`
 
-the part we really care about is the first character, which represents the diff between HEAD and the index. we can compute that column with `git diff --name-status -z --cached`. we can also potentially make use of the `--diff-filter=M` option to only get modified files (which is what we want, since other forms of modification cannot be absorbed anyway). finally, to get strictly normalized output, we use the plumbing `diff-index` command (notably, `diff-index` is immune to `diff.mnemonicPrefix`), and we end up with this:
+
+the part we really care about is the first character, which represents the diff between HEAD and the index. we can compute that column with `git diff-index --name-status -z --cached HEAD`. (we could compute the second column with `git diff-files --name-status -z`, if we needed it.) in addition, since we only care about modifications in the index, we can actually just list the names with `git diff-index --name-only -z --diff-filter=M --cached HEAD`:
 
 ```python
 paths = sorted(invoke('git', 'diff-index', '--name-only', '-z', '--diff-filter=M', '--cached', HEAD).split('\0')[:-1])
 ```
 
-or if we actually wanted the entire patch, we could do this. we have to be careful to pass disabling arguments so that we're isolated from the user's configuration variables.
+of course, in reality, we need the entire patch, so we have to invoke diff-index with `-p`. as i discuss in great detail below, diff-index is important because it ignores configuration variables that are honored by higher-level diff commands.
 
 ```python
-invoke('git', 'diff-index', '--cached', HEAD, '--diff-filter=M', '--unified=0', '--no-color', '--diff-algorithm=default', '--word-diff=none', '--no-renames', '--full-index', '--binary', '--no-ext-diff', '--no-textconv')
+invoke('git', 'diff-index', '--cached', HEAD, '--unified=0', '--no-color', '--word-diff=none', '--no-ext-diff', '--no-textconv', '--submodule=short', '--diff-filter=M', '--full-index')
 ```
 
-to get the patches for the stack, we could do this:
+we can break down this invocation:
+
+- `git diff-index --cached HEAD`: compare the content of the index against HEAD, ignoring the working tree altogether
+- `--unified=0`: implies `--patch`, which actually prints the patch out. this also disables all context and breaks hunks as granularly as possible, which is good for us because we'd have to do that manually anyway
+- `--no-color`: obviously we don't want ansi color escapes in our output
+- `--word-diff=none`: disable word-level diffing, it's much much harder to parse. (patch theory doesn't say anything about the granularity of diffs, so theoretically you could perform commutation at the word level if you really wanted to)
+- `--no-ext-diff`: disable the user's external diff helpers, if any
+- `--no-textconv`: disable any gitattributes transformations
+- `--submodule=short`: always display gitlinks in the "Subproject commit" format (see below)
+- `--diff-filter=M`: we only care about modified files
+- `--full-index`: print the entire blob shas in the index, we'll need them later (see below)
+
+there are also a few more flags we could pass, like `-M` or `-C` (to enable rename/copy detection), or `--diff-algorithm` (which influences how the diff is built - see also the various experimental diff heuristic flags).
+
+the stack is harder because it consists of several commits and could hypothetically contain a root commit. we could get all of them with a carefully constructed git log, if our parser was able to separate the log entries correctly, but this invocation does not work if the deepest commit in the stack is root:
 
 ```python
-# TODO: copy detection? rename detection? should we display anything else in the format? should we use minimal diff?
-invoke('git', 'log', '{}^..{}'.format(commit_stack[-1]['commit'], commit_stack[0]['commit']), '--format=tformat:%H', '--unified=0', '--no-color', '--diff-algorithm=default', '--word-diff=none', '--no-renames', '--full-index', '--binary', '--no-ext-diff', '--no-textconv')
+invoke('git', 'log', '{}^..{}'.format(commit_stack[-1]['commit'], commit_stack[0]['commit']), '--format=tformat:%H', '--unified=0', '--no-color', '--word-diff=none', '--no-ext-diff', '--no-textconv', '--submodule=short', '--full-index')
+```
+
+alternatively, we can fetch commits one by one with `git diff-tree`, if we discard the first line (which contains the commit's hash). when passed a single commit, diff-tree compares it against its parent. it will ignore merges by default unless you tell it to compare against all parents. it will also fail on root commits, unless you pass `--root` to request comparison against the empty tree.
+
+```python
+invoke('git', 'diff-tree', commit_stack[-1]['commit'], '--unified=0', '--no-color', '--word-diff=none', '--no-ext-diff', '--no-textconv', '--submodule=short', '--root')
 ```
 
 # TODO
