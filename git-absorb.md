@@ -272,6 +272,7 @@ output | HEAD..index | index..worktree | repro example
 --- | --- | --- | ---
 `_M` | none | modified | `echo foo > foo`
 `_D` | none | deleted | `rm foo`
+`_A` | intent to add | modified | `echo foo > foo && git add -N foo` (see git [21f862b..2c49f7f](https://github.com/git/git/compare/21f862b498925194f8f1ebe8203b7a7df756555b...2c49f7ffb3063fdccccf2a038ab2eee66e7395e4), prior to 2.11.0 this would print `AM`)
 `M_` | modified | none | `echo foo > foo && git add foo`
 `MM` | modified | modified | `echo foo > foo && git add foo && echo foo >> foo`
 `MD` | modified | deleted | `echo foo > foo && git add foo && rm foo`
