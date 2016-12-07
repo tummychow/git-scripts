@@ -1,6 +1,24 @@
 from utils import *
 
 
+def dict_helper_contains_all_or_none(val, *keys):
+    keys_present = map(lambda key: key in val, keys)
+    if all(keys_present):
+        return True
+    if not any(keys_present):
+        return False
+    raise RuntimeError('{!r} contains some but not all of {!r}'.format(val, keys))
+
+
+def dict_helper_at_most_one_true(val):
+    keys_true = list(filter(lambda key: val[key], val.keys()))
+    if len(keys_true) > 1:
+        raise RuntimeError('{!r} contains multiple truthy keys'.format(val))
+    if len(keys_true) == 1:
+        return keys_true[0]
+    return None
+
+
 def parse_helper_mode_header(mode):
     # git does not preserve all file permission bits, it only knows of four
     # possible modes
@@ -156,6 +174,17 @@ class DiffList(list):
         # paths
         # TODO: what combinations of extended header are invalid? is index
         # always present?
+
+    def parse_helper_cleanup_headers(self):
+        ext_headers = self[-1]['extended_headers']
+        if 'index' not in ext_headers:
+            raise RuntimeError('extended header {!r} does not contain index'.format(ext_headers))
+        is_copy = dict_helper_contains_all_or_none(ext_headers, 'copy from', 'copy to')
+        is_rename = dict_helper_contains_all_or_none(ext_headers, 'rename from', 'rename to')
+        if is_copy and is_rename:
+            raise RuntimeError('extended header {!r} is both a rename and a copy'.format(ext_headers))
+        self[-1]['before_path'] = ''
+        self[-1]['after_path'] = ''
 
     def parse_text_headers(self, line):
         # a text patch always has a "---" line and then a "+++" line, which can
