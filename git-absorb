@@ -4,11 +4,17 @@ from utils import *
 import difflist
 import subprocess
 import itertools
+import io
 
 
 def parse_commit_log_line(log_line):
     [sha, parent_shas, author_email] = log_line.split('\0')
     return {'commit': sha, 'parents': parent_shas.split(' '), 'author': author_email}
+
+
+def simplified_diff(stream):
+    # TODO: clean up the diff structure according to our needs
+    return difflist.DiffList(stream)
 
 
 # TODO: parse these from args
@@ -97,4 +103,65 @@ commit_stack = list(itertools.takewhile(lambda commit: len(commit['parents']) <=
 if len(commit_stack) > MAX_STACK and not FORCE:
     commit_stack = commit_stack[:MAX_STACK]
 
+# step 3a: parse the index diff
+# to make sure the diff is machine-readable, we specify some common options
+GIT_DIFF_OPTS = [
+    # actually print a patch, and omit all context lines
+    '--unified=0',
+    # disable color
+    '--no-color',
+    # disable word splitting
+    '--word-diff=none',
+    # disable external diff helpers
+    '--no-ext-diff',
+    # disable gitattributes conversions
+    '--no-textconv',
+    # display gitlinks as "Subproject comit" blobs
+    '--submodule=short',
+    # display the entire SHA1 of the blob in the index extended headers
+    '--full-index'
+]
+index_diff = simplified_diff(io.BytesIO(subprocess.run([
+    'git',
+    # use diff-index to compare the index to a treeish
+    'diff-index',
+    # use the index as is, ignoring the working tree
+    '--cached',
+    # compare against HEAD as the treeish
+    HEAD,
+    # only show Modified, ignoring Add/Delete/Rename/Copy
+    '--diff-filter=M',
+    # use other standard formatting options
+    *GIT_DIFF_OPTS
+], check=True, stdout=subprocess.PIPE).stdout))
+
+# step 3b: parse diffs for the entire stack
+for commit in commit_stack:
+    # TODO: parse one big log instead of one diff-tree per commit
+    diff_stream = io.BytesIO(subprocess.run([
+        'git',
+        # compare a treeish to its parent
+        'diff-tree',
+        # the treeish to use is the commit
+        commit['commit'],
+        # if the commit has no parent, compare to empty tree
+        '--root',
+        # use other standard formatting options
+        *GIT_DIFF_OPTS
+    ], check=True, stdout=subprocess.PIPE).stdout)
+    # when invoked with one argument, diff-tree will put
+    # the sha on the first line, so we need to discard that
+    next(diff_stream)
+    commit['diff'] = simplified_diff(diff_stream)
+
 print('\n'.join(map(lambda commit: '{} -> {} ({})'.format(commit['commit'], commit['parents'][0], commit['author']), commit_stack)))
+
+import pprint
+import shutil
+pprint.pprint(
+    commit_stack,
+    indent=4,
+    width=shutil.get_terminal_size(
+        fallback=(80, 40)
+    ).columns,
+)
