@@ -1,48 +1,9 @@
 #!/usr/bin/env python3
 
+from utils import *
+import difflist
 import subprocess
 import itertools
-
-
-def deprefix(val, prefix, check=False):
-    if val.startswith(prefix):
-        return val[len(prefix):]
-    elif check:
-        raise RuntimeError('{!r} does not start with {!r}'.format(val, prefix))
-    return val
-
-
-def desuffix(val, suffix, check=False):
-    if val.endswith(suffix):
-        return val[:-len(suffix)]
-    elif check:
-        raise RuntimeError('{!r} does not end with {!r}'.format(val, suffix))
-    return val
-
-
-def invoke(*cmd):
-    return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, universal_newlines=True).stdout
-
-
-def git_config_get(*names, default=None, get_all=False):
-    action = '--get'
-    if get_all:
-        action = '--get-all'
-        if default is None:
-            default = []
-
-    for variable in names:
-        try:
-            ret = invoke('git', 'config', action, '--null', variable).split('\0')[:-1]
-            if not get_all:
-                [ret] = ret
-            return ret
-        except subprocess.CalledProcessError as e:
-            if e.returncode != 1:
-                raise
-    if default is None:
-        raise RuntimeError('git config did not contain any of {!r}'.format(names))
-    return default
 
 
 def parse_commit_log_line(log_line):

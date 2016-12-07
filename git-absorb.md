@@ -289,7 +289,6 @@ output | HEAD..index | index..worktree | repro example
 `CD` | copied | deleted | `cp foo bar && git add bar && rm bar`
 `??` | untracked | untracked | `touch bar`
 
-
 the part we really care about is the first character, which represents the diff between HEAD and the index. we can compute that column with `git diff-index --name-status -z --cached HEAD`. (we could compute the second column with `git diff-files --name-status -z`, if we needed it.) in addition, since we only care about modifications in the index, we can actually just list the names with `git diff-index --name-only -z --diff-filter=M --cached HEAD`:
 
 ```python
