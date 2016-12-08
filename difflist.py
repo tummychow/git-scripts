@@ -10,8 +10,10 @@ def dict_helper_contains_all_or_none(val, *keys):
     raise RuntimeError('{!r} contains some but not all of {!r}'.format(val, keys))
 
 
-def dict_helper_at_most_one_true(val):
-    keys_true = list(filter(lambda key: val[key], val.keys()))
+def dict_helper_at_most_one_true(val, *keys):
+    if not keys:
+        keys = val.keys()
+    keys_true = list(filter(lambda key: key in val and val[key], keys))
     if len(keys_true) > 1:
         raise RuntimeError('{!r} contains multiple truthy keys'.format(val))
     if len(keys_true) == 1:
@@ -152,6 +154,7 @@ class DiffList(list):
                 ext_headers[prefix] = rest_of_line
                 break
             else:
+                self.parse_helper_cleanup_headers()
                 # none of the prefixes matched, so this line is not an extended
                 # header, and there are three possibilities:
                 # it could lead to a binary patch
@@ -168,23 +171,71 @@ class DiffList(list):
                 return self.parse_git_headers, line
         # we have exhausted the input, and every line was an extended header
         # this is a valid point to terminate
+        # TODO: avoid repeating this on both exit paths
+        self.parse_helper_cleanup_headers()
         return None, None
-        # TODO: we have some cleanup to do after parsing extended headers, eg
-        # if this is not a copy/rename, we should parse the init line to get the
-        # paths
-        # TODO: what combinations of extended header are invalid? is index
-        # always present?
 
     def parse_helper_cleanup_headers(self):
         ext_headers = self[-1]['extended_headers']
-        if 'index' not in ext_headers:
-            raise RuntimeError('extended header {!r} does not contain index'.format(ext_headers))
+        # first we want to identify the paths affected
         is_copy = dict_helper_contains_all_or_none(ext_headers, 'copy from', 'copy to')
         is_rename = dict_helper_contains_all_or_none(ext_headers, 'rename from', 'rename to')
+        # assert presence of (dis)similarity index if applicable
+        if is_copy or is_rename:
+            if dict_helper_at_most_one_true(ext_headers, 'similarity index', 'dissimilarity index') is None:
+                raise RuntimeError('{!r} was a rename/copy, but did not contain (dis)similarity index')
+        # now actually retrieve the paths from the appropriate places
         if is_copy and is_rename:
             raise RuntimeError('extended header {!r} is both a rename and a copy'.format(ext_headers))
-        self[-1]['before_path'] = ''
-        self[-1]['after_path'] = ''
+        elif is_copy:
+            self[-1]['before_path'] = ext_headers['copy from']
+            self[-1]['after_path'] = ext_headers['copy to']
+        elif is_rename:
+            self[-1]['before_path'] = ext_headers['rename from']
+            self[-1]['after_path'] = ext_headers['rename to']
+        else:
+            # in this case, we know that the init header's before and after
+            # filenames are the same, so we can split the header in half by
+            # length to find that filename
+            init_header_files = deprefix(self[-1]['init_header'], b'diff --git', check=True)
+            midpoint = int(len(init_header_files) / 2)
+            # offset by 1 to discard the leading space
+            self[-1]['before_path'] = init_header_files[1:midpoint]
+            self[-1]['after_path'] = init_header_files[midpoint+1:]
+        # next we want to identify the mode
+        mode_source = dict_helper_at_most_one_true(ext_headers, 'old mode', 'deleted file mode', 'new file mode')
+        # there are five possible ways the mode could be denoted:
+        # the file could have been deleted
+        if mode_source == 'deleted file mode':
+            self[-1]['before_mode'] = ext_headers[mode_source]
+            self[-1]['after_mode'] = None
+            self[-1]['after_path'] = None
+        # or the file could have been added
+        elif mode_source == 'new file mode':
+            self[-1]['before_mode'] = None
+            self[-1]['before_path'] = None
+            self[-1]['after_mode'] = ext_headers[mode_source]
+        # or the file's mode could have been modified, with old/new headers
+        elif mode_source == 'old mode':
+            # we assert that both old and new mode headers are present
+            dict_helper_contains_all_or_none(ext_headers, 'old mode', 'new mode')
+            self[-1]['before_mode'] = ext_headers['old mode']
+            self[-1]['after_mode'] = ext_headers['new mode']
+        # if none of those headers are present, the file's mode was not changed
+        else:
+            mode = None
+            # normally when the file's mode is not changed, it will be included
+            # in the index header
+            # however, the index header can be omitted if the blob was not
+            # changed (exact rename or copy), in which case the mode cannot be
+            # determined from the patch content
+            if 'index' in ext_headers:
+                mode = ext_headers['index']['mode']
+            self[-1]['before_mode'] = mode
+            self[-1]['after_mode'] = mode
+        # unquote the paths, wherever we got them from
+        self[-1]['before_path'] = parse_helper_quoted_filename(self[-1]['before_path'])
+        self[-1]['after_path'] = parse_helper_quoted_filename(self[-1]['after_path'])
 
     def parse_text_headers(self, line):
         # a text patch always has a "---" line and then a "+++" line, which can
@@ -192,10 +243,10 @@ class DiffList(list):
         # one very important difference between these paths and the ones used in
         # extended headers is that /dev/null will be used here for creations and
         # deletions
-        # TODO: ignore these lines in favor of the lines parsed from the headers
-        # earlier (these would be omitted if the patch was empty)
-        self[-1]['before_path'] = parse_helper_quoted_filename(deprefix(line, b'--- ', check=True))
-        self[-1]['after_path'] = parse_helper_quoted_filename(deprefix(next(self.stream), b'+++ ', check=True))
+        # therefore, we prefer the lines in the extended headers for paths, but
+        # we still attempt to parse these for validation purposes
+        parse_helper_quoted_filename(deprefix(line, b'--- ', check=True))
+        parse_helper_quoted_filename(deprefix(next(self.stream), b'+++ ', check=True))
         self[-1]['text_hunks'] = []
         # there must be at least one hunk following this header
         return self.parse_text_hunk, next(self.stream)

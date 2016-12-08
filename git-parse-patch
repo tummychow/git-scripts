@@ -25,6 +25,8 @@ if len(sys.argv) > 1:
         '--word-diff=none',
         # display submodules in the "Subproject commit" format
         '--submodule=short',
+        # remove 'a/' 'b/' prefixes on paths
+        '--no-prefix',
     ]
     # pass any remaining args to diff-tree
     # useful flags to try:
@@ -41,7 +43,6 @@ if len(sys.argv) > 1:
     # -S
     # -G
     # -O
-    # --src-prefix, --dst-prefix, --no-prefix
     # --root
     CMD.extend(sys.argv[1:])
     import subprocess

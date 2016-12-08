@@ -439,7 +439,7 @@ these lines are only reported on renames/copies. git uses them to tell you how s
 index <sha1>..<sha1> <mode>
 ```
 
-the index line indicates the sha1 hashes of the blobs before and after the diff. if the mode was unchanged, it will be mentioned afterwards. however, if it was changed, then it will be omitted from this line, and other extended headers will detail how the mode was affected. if you use `--full-index`, the sha1 hashes will be fully expanded to 40 characters. creations and deletions will use a hash value of zero.
+the index line indicates the sha1 hashes of the blobs before and after the diff. if the mode was unchanged, it will be mentioned afterwards. however, if it was changed, then it will be omitted from this line, and other extended headers will detail how the mode was affected. if you use `--full-index`, the sha1 hashes will be fully expanded to 40 characters. creations and deletions will use a hash value of zero. if the blob shas are the same before and after, then the index header will be omitted.
 
 although git appears to generate the extended headers in a consistent order, there's no reason they couldn't be swapped around, so be careful about that when parsing them.
 

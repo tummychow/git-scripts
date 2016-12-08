@@ -119,7 +119,13 @@ GIT_DIFF_OPTS = [
     # display gitlinks as "Subproject comit" blobs
     '--submodule=short',
     # display the entire SHA1 of the blob in the index extended headers
-    '--full-index'
+    '--full-index',
+    # don't use 'a/' 'b/' prefixes on paths
+    '--no-prefix',
+    # detect renames
+    '--find-renames',
+    # detect copies of files that were also modified
+    '--find-copies',
 ]
 index_diff = simplified_diff(io.BytesIO(subprocess.run([
     'git',
@@ -129,8 +135,8 @@ index_diff = simplified_diff(io.BytesIO(subprocess.run([
     '--cached',
     # compare against HEAD as the treeish
     HEAD,
-    # only show Modified, ignoring Add/Delete/Rename/Copy
-    '--diff-filter=M',
+    # only show Modify/Rename/Copy, ignoring Add/Delete
+    '--diff-filter=MRC',
     # use other standard formatting options
     *GIT_DIFF_OPTS
 ], check=True, stdout=subprocess.PIPE).stdout))
@@ -151,7 +157,8 @@ for commit in commit_stack:
     ], check=True, stdout=subprocess.PIPE).stdout)
     # when invoked with one argument, diff-tree will put
     # the sha on the first line, so we need to discard that
-    next(diff_stream)
+    # the entire thing could be empty for a root commit
+    next(diff_stream, None)
     commit['diff'] = simplified_diff(diff_stream)
 
 print('\n'.join(map(lambda commit: '{} -> {} ({})'.format(commit['commit'], commit['parents'][0], commit['author']), commit_stack)))
@@ -159,7 +166,7 @@ print('\n'.join(map(lambda commit: '{} -> {} ({})'.format(commit['commit'], comm
 import pprint
 import shutil
 pprint.pprint(
-    commit_stack,
+    index_diff,
     indent=4,
     width=shutil.get_terminal_size(
         fallback=(80, 40)
