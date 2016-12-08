@@ -41,7 +41,29 @@ def parse_helper_quoted_filename(filename):
     # characters
     # if a filename does not contain any of those, then git will print it
     # completely unquoted
-    # TODO: this function
+    quotestart = filename.startswith(b'"')
+    quoteend = filename.endswith(b'"')
+    if not quotestart and not quoteend:
+        return filename
+    if (quotestart and not quoteend) or (not quotestart and quoteend):
+        raise RuntimeError('{!r} is missing a quote'.format(filename))
+    # this file is quoted, we should start by discarding those
+    filename = filename[1:-1]
+    sindex = 0
+    backslash = filename.find(b'\\', sindex)
+    while backslash != -1:
+        escape_char = filename[backslash+1:backslash+2]
+        if escape_char == b'\\' or escape_char == b'"':
+            pass
+        elif escape_char == b'n':
+            escape_char = b'\n'
+        elif escape_char == b't':
+            escape_char = b'\t'
+        else:
+            raise RuntimeError('{!r} contains unrecognized escape {!r}'.format(filename, escape_char))
+        filename = filename[0:backslash] + escape_char + filename[backslash+2:]
+        sindex = backslash + 1
+        backslash = filename.find(b'\\', sindex)
     return filename
 
 
