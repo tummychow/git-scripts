@@ -178,21 +178,17 @@ class DiffList(list):
     def parse_helper_cleanup_headers(self):
         ext_headers = self[-1]['extended_headers']
         # first we want to identify the paths affected
-        is_copy = dict_helper_contains_all_or_none(ext_headers, 'copy from', 'copy to')
-        is_rename = dict_helper_contains_all_or_none(ext_headers, 'rename from', 'rename to')
-        # assert presence of (dis)similarity index if applicable
-        if is_copy or is_rename:
+        path_header_from = dict_helper_at_most_one_true(ext_headers, 'copy from', 'rename from')
+        # either the file's path changed (rename/copy)
+        if path_header_from is not None:
+            # assert presence of a (dis)similarity header
             if dict_helper_at_most_one_true(ext_headers, 'similarity index', 'dissimilarity index') is None:
                 raise RuntimeError('{!r} was a rename/copy, but did not contain (dis)similarity index')
-        # now actually retrieve the paths from the appropriate places
-        if is_copy and is_rename:
-            raise RuntimeError('extended header {!r} is both a rename and a copy'.format(ext_headers))
-        elif is_copy:
-            self[-1]['before_path'] = ext_headers['copy from']
-            self[-1]['after_path'] = ext_headers['copy to']
-        elif is_rename:
-            self[-1]['before_path'] = ext_headers['rename from']
-            self[-1]['after_path'] = ext_headers['rename to']
+            path_header_to = desuffix(path_header_from, ' from', check=True) + ' to'
+            dict_helper_contains_all_or_none(ext_headers, path_header_from, path_header_to)
+            self[-1]['before_path'] = ext_headers[path_header_from]
+            self[-1]['after_path'] = ext_headers[path_header_to]
+        # or it did not change
         else:
             # in this case, we know that the init header's before and after
             # filenames are the same, so we can split the header in half by
@@ -203,36 +199,36 @@ class DiffList(list):
             self[-1]['before_path'] = init_header_files[1:midpoint]
             self[-1]['after_path'] = init_header_files[midpoint+1:]
         # next we want to identify the mode
-        mode_source = dict_helper_at_most_one_true(ext_headers, 'old mode', 'deleted file mode', 'new file mode')
+        mode_header = dict_helper_at_most_one_true(ext_headers, 'old mode', 'deleted file mode', 'new file mode')
         # there are five possible ways the mode could be denoted:
         # the file could have been deleted
-        if mode_source == 'deleted file mode':
-            self[-1]['before_mode'] = ext_headers[mode_source]
+        if mode_header == 'deleted file mode':
+            self[-1]['before_mode'] = ext_headers[mode_header]
             self[-1]['after_mode'] = None
             self[-1]['after_path'] = None
         # or the file could have been added
-        elif mode_source == 'new file mode':
+        elif mode_header == 'new file mode':
             self[-1]['before_mode'] = None
             self[-1]['before_path'] = None
-            self[-1]['after_mode'] = ext_headers[mode_source]
+            self[-1]['after_mode'] = ext_headers[mode_header]
         # or the file's mode could have been modified, with old/new headers
-        elif mode_source == 'old mode':
+        elif mode_header == 'old mode':
             # we assert that both old and new mode headers are present
             dict_helper_contains_all_or_none(ext_headers, 'old mode', 'new mode')
             self[-1]['before_mode'] = ext_headers['old mode']
             self[-1]['after_mode'] = ext_headers['new mode']
         # if none of those headers are present, the file's mode was not changed
         else:
-            mode = None
+            mode_source = None
             # normally when the file's mode is not changed, it will be included
             # in the index header
             # however, the index header can be omitted if the blob was not
             # changed (exact rename or copy), in which case the mode cannot be
             # determined from the patch content
             if 'index' in ext_headers:
-                mode = ext_headers['index']['mode']
-            self[-1]['before_mode'] = mode
-            self[-1]['after_mode'] = mode
+                mode_source = ext_headers['index']['mode']
+            self[-1]['before_mode'] = mode_source
+            self[-1]['after_mode'] = mode_source
         # unquote the paths, wherever we got them from
         self[-1]['before_path'] = parse_helper_quoted_filename(self[-1]['before_path'])
         self[-1]['after_path'] = parse_helper_quoted_filename(self[-1]['after_path'])
