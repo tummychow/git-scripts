@@ -10,14 +10,12 @@ def dict_helper_contains_all_or_none(val, *keys):
     raise RuntimeError('{!r} contains some but not all of {!r}'.format(val, keys))
 
 
-def dict_helper_at_most_one_true(val, *keys):
-    if not keys:
-        keys = val.keys()
-    keys_true = list(filter(lambda key: key in val and val[key], keys))
-    if len(keys_true) > 1:
-        raise RuntimeError('{!r} contains multiple truthy keys'.format(val))
-    if len(keys_true) == 1:
-        return keys_true[0]
+def dict_helper_contains_at_most_one(val, *keys):
+    keys_present = list(filter(lambda key: key in val, keys))
+    if len(keys_present) > 1:
+        raise RuntimeError('{!r} contains more than one of of {!r}'.format(val, keys))
+    if len(keys_present) == 1:
+        return keys_present[0]
     return None
 
 
@@ -178,11 +176,11 @@ class DiffList(list):
     def parse_helper_cleanup_headers(self):
         ext_headers = self[-1]['extended_headers']
         # first we want to identify the paths affected
-        path_header_from = dict_helper_at_most_one_true(ext_headers, 'copy from', 'rename from')
+        path_header_from = dict_helper_contains_at_most_one(ext_headers, 'copy from', 'rename from')
         # either the file's path changed (rename/copy)
         if path_header_from is not None:
             # assert presence of a (dis)similarity header
-            if dict_helper_at_most_one_true(ext_headers, 'similarity index', 'dissimilarity index') is None:
+            if dict_helper_contains_at_most_one(ext_headers, 'similarity index', 'dissimilarity index') is None:
                 raise RuntimeError('{!r} was a rename/copy, but did not contain (dis)similarity index')
             path_header_to = desuffix(path_header_from, ' from', check=True) + ' to'
             dict_helper_contains_all_or_none(ext_headers, path_header_from, path_header_to)
@@ -202,7 +200,7 @@ class DiffList(list):
         self[-1]['before_path'] = parse_helper_quoted_filename(self[-1]['before_path'])
         self[-1]['after_path'] = parse_helper_quoted_filename(self[-1]['after_path'])
         # next we want to identify the mode
-        mode_header = dict_helper_at_most_one_true(ext_headers, 'old mode', 'deleted file mode', 'new file mode')
+        mode_header = dict_helper_contains_at_most_one(ext_headers, 'old mode', 'deleted file mode', 'new file mode')
         # there are five possible ways the mode could be denoted:
         # the file could have been deleted
         if mode_header == 'deleted file mode':
