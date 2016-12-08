@@ -192,7 +192,7 @@ class DiffList(list):
             # filenames are the same, so we can split the header in half by
             # length to find that filename
             init_header_files = deprefix(self[-1]['init_header'], b'diff --git', check=True)
-            midpoint = int(len(init_header_files) / 2)
+            midpoint = len(init_header_files) // 2
             # offset by 1 to discard the leading space
             self[-1]['before_path'] = init_header_files[1:midpoint]
             self[-1]['after_path'] = init_header_files[midpoint+1:]
