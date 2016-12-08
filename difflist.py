@@ -198,6 +198,9 @@ class DiffList(list):
             # offset by 1 to discard the leading space
             self[-1]['before_path'] = init_header_files[1:midpoint]
             self[-1]['after_path'] = init_header_files[midpoint+1:]
+        # unquote the paths, wherever we got them from
+        self[-1]['before_path'] = parse_helper_quoted_filename(self[-1]['before_path'])
+        self[-1]['after_path'] = parse_helper_quoted_filename(self[-1]['after_path'])
         # next we want to identify the mode
         mode_header = dict_helper_at_most_one_true(ext_headers, 'old mode', 'deleted file mode', 'new file mode')
         # there are five possible ways the mode could be denoted:
@@ -229,9 +232,6 @@ class DiffList(list):
                 mode_source = ext_headers['index']['mode']
             self[-1]['before_mode'] = mode_source
             self[-1]['after_mode'] = mode_source
-        # unquote the paths, wherever we got them from
-        self[-1]['before_path'] = parse_helper_quoted_filename(self[-1]['before_path'])
-        self[-1]['after_path'] = parse_helper_quoted_filename(self[-1]['after_path'])
 
     def parse_text_headers(self, line):
         # a text patch always has a "---" line and then a "+++" line, which can
