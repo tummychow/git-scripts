@@ -170,7 +170,5 @@ import shutil
 pprint.pprint(
     index_diff,
     indent=4,
-    width=shutil.get_terminal_size(
-        fallback=(80, 40)
-    ).columns,
+    width=shutil.get_terminal_size().columns,
 )

@@ -51,7 +51,5 @@ if len(sys.argv) > 1:
 pprint.pprint(
     difflist.DiffList(STREAM),
     indent=4,
-    width=shutil.get_terminal_size(
-        fallback=(80, 40)
-    ).columns,
+    width=shutil.get_terminal_size().columns,
 )
