@@ -100,10 +100,17 @@ def parse_helper_hunk_count(hunk_count):
     # the comma and the count may be omitted if the hunk spans exactly one line
     numbers = hunk_count[1:].decode('ascii').split(',')
     if len(numbers) == 1:
-        return {'start': int(numbers[0]), 'count': 1}
-    if len(numbers) == 2:
-        return {'start': int(numbers[0]), 'count': int(numbers[1])}
-    raise RuntimeError('hunk line count {!r} contains too many commas'.format(hunk_count))
+        count = 1
+    elif len(numbers) == 2:
+        count = int(numbers[1])
+    else:
+        raise RuntimeError('hunk line count {!r} contains too many commas'.format(hunk_count))
+    start = int(numbers[0])
+    return {
+        'start': start,
+        'count': count,
+        'end': None if count == 0 else start + count - 1,
+    }
 
 
 EXTENDED_HEADER_MAP = {
@@ -440,3 +447,57 @@ class DiffList(list):
             return self.parse_text_hunk, line
         # otherwise the whole patch is over
         return self.parse_git_headers, line
+
+def commute_two_hunks(first, second):
+    # first we have to determine which hunk is above the other
+    before_first_above_second = first['before']['start'] <= second['before']['start']
+    after_first_above_second = first['after']['start'] <= second['after']['start']
+    # we expect the above/below relationship to be the same on both sides, if
+    # not then we've got some strangely formed hunks and error out
+    if before_first_above_second and after_first_above_second:
+        above = first
+        below = second
+    elif not before_first_above_second and not after_first_above_second:
+        above = second
+        below = first
+    else:
+        raise RuntimeError('first is {} second on before side, but {} second on after side (fb={} fa={} sb={} sa={})'.format('above' if before_first_above_second else 'below', 'above' if after_first_above_second else 'below', first['before'], first['after'], second['before'], second['after']))
+    # now we compute the ranges of affected lines and confirm that the hunks
+    # are separated by at least one unchanged line on each side
+    # if either hunk is empty, then they're already separated, so we have to
+    # check that first
+    if above['before']['count'] != 0 and below['before']['count'] != 0:
+        # we have confirmed that neither hunk is empty, now we need to check
+        # for an empty line between the end of the above hunk and the start of
+        # the below hunk
+        if below['before']['start'] - above['before']['end'] < 2:
+            return False, first, second
+    # TODO: avoid repeating these three lines
+    if above['after']['count'] != 0 and below['after']['count'] != 0:
+        if below['after']['start'] - above['after']['end'] < 2:
+            return False, first, second
+    # at this point, we know the hunks commute
+    # we need to know how the net number of lines added/removed by the above
+    # hunk
+    above_change_offset = above['after']['count'] - above['before']['count']
+    # now, the below hunk has to move by that many lines
+    # if the below hunk was first, then it has to move down, now that the above
+    # hunk is being commuted to come before it
+    if below is second:
+        # but if the below hunk was second, then it has to move up instead of
+        # down
+        above_change_offset = -above_change_offset
+    ret_below = below.copy()
+    ret_below['before'] = ret_below['before'].copy()
+    ret_below['before']['start'] += above_change_offset
+    if ret_below['before']['count'] != 0:
+        ret_below['before']['end'] += above_change_offset
+    # TODO: avoid repeating these four lines
+    ret_below['after'] = ret_below['after'].copy()
+    ret_below['after']['start'] += above_change_offset
+    if ret_below['after']['count'] != 0:
+        ret_below['after']['end'] += above_change_offset
+    # make sure to return the commuted hunks in the right order
+    if below is second:
+        return True, ret_below, above
+    return True, above, ret_below
