@@ -5,6 +5,7 @@ import difflist
 import subprocess
 import itertools
 import io
+import sys
 
 
 def parse_commit_log_line(log_line):
@@ -101,6 +102,7 @@ commit_stack = list(itertools.takewhile(lambda commit: len(commit['parents']) <=
 
 # step 2e: limit the maximum height of the stack
 if len(commit_stack) > MAX_STACK and not FORCE:
+    sys.stderr.write('warning: stack height is being trimmed from {} (base {}) to {}\n'.format(len(commit_stack), commit_stack[-1]['commit'], MAX_STACK))
     commit_stack = commit_stack[:MAX_STACK]
 
 # step 3a: parse the index diff
