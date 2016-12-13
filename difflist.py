@@ -399,11 +399,19 @@ class DiffList(list):
                 raise RuntimeError('found more before/after lines than expected ({}>{} || {}>{})'.format(before_seen, before['count'], after_seen, after['count']))
             if before_seen == before['count'] and after_seen == after['count']:
                 break
-            # by definition, a no-newline indicator terminates the block, so the
-            # line's type must not continue the block that was terminated
             if not blocks[-1]['ending_newline']:
+                # by definition, a no-newline indicator terminates the block, so
+                # the line's type must not continue the block that was
+                # terminated
                 if line_type == current_type:
                     raise RuntimeError('line {!r} continues a block that was terminated by a no-newline indicator'.format(line))
+                # in addition, a no-newline context block can't have anything
+                # after it, since it's the end of that file
+                if current_type == ' ':
+                    raise RuntimeError('a no-newline context block must terminate the hunk, but found line {!r}'.format(line))
+                # TODO: a no-newline before block can only be followed by a
+                # single after block and then the patch must terminate
+                # TODO: a no-newline after block cannot be followed by anything
             # the previous block has ended and we need to start a new one
             if line_type != current_type:
                 # context blocks can transition to before or after blocks, and
@@ -444,6 +452,13 @@ class DiffList(list):
             raise RuntimeError('hunk consists entirely of context blocks {!r}'.format(blocks))
         # there could be another hunk here
         if line.startswith(b'@@'):
+            # unless the last hunk ended in a no-newline context block, in which
+            # case it represents the end of the entire file and no more hunks
+            # can come after it
+            # TODO: avoid repeating the conditions here that we already
+            # expressed earlier
+            if blocks[-1]['type'] == ' ' and not blocks[-1]['ending_newline']:
+                raise RuntimeError('a no-newline context block must terminate the patch, but found new hunk header {!r}'.format(line))
             return self.parse_text_hunk, line
         # otherwise the whole patch is over
         return self.parse_git_headers, line
