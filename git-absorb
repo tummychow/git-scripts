@@ -154,13 +154,15 @@ for commit in commit_stack:
         commit['commit'],
         # if the commit has no parent, compare to empty tree
         '--root',
+        # don't print the commit id if we passed a single commit (which we're
+        # doing here)
+        '--no-commit-id',
         # use other standard formatting options
         *GIT_DIFF_OPTS
     ], check=True, stdout=subprocess.PIPE).stdout)
     # when invoked with one argument, diff-tree will put
     # the sha on the first line, so we need to discard that
     # the entire thing could be empty for a root commit
-    next(diff_stream, None)
     commit['diff'] = simplified_diff(diff_stream)
 
 print('\n'.join(map(lambda commit: '{} -> {} ({})'.format(commit['commit'], commit['parents'][0] or 'NONE', commit['author']), commit_stack)))

@@ -13,20 +13,24 @@ if len(sys.argv) > 1:
         'git',
         '--no-pager',
         'diff-tree',
-        # actually display a patch
+        # actually print a patch
         '--patch',
-        # disable all color
+        # disable color
         '--no-color',
-        # disable all external diffing helpers
-        '--no-ext-diff',
-        # disable all gitattributes text conversion
-        '--no-textconv',
-        # disable word-level diff splitting
+        # disable word splitting
         '--word-diff=none',
-        # display submodules in the "Subproject commit" format
+        # disable external diff helpers
+        '--no-ext-diff',
+        # disable gitattributes conversions
+        '--no-textconv',
+        # display gitlinks as "Subproject comit" blobs
         '--submodule=short',
-        # remove 'a/' 'b/' prefixes on paths
+        # don't use 'a/' 'b/' prefixes on paths
         '--no-prefix',
+        # if the commit has no parent, compare to empty tree
+        '--root',
+        # don't print the commit id if we passed a single commit
+        '--no-commit-id',
     ]
     # pass any remaining args to diff-tree
     # useful flags to try:
@@ -43,7 +47,6 @@ if len(sys.argv) > 1:
     # -S
     # -G
     # -O
-    # --root
     CMD.extend(sys.argv[1:])
     import subprocess
     STREAM = subprocess.Popen(CMD, stdout=subprocess.PIPE, universal_newlines=False).stdout
