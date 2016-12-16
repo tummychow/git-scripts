@@ -463,6 +463,67 @@ class DiffList(list):
         # otherwise the whole patch is over
         return self.parse_git_headers, line
 
+    def patch_by_after_path(self, target_path):
+        # TODO: post-parse validation that patches are consistent with each
+        # other, eg you can't have two patches with the same after_path
+        for idx, patch in enumerate(self):
+            if patch['after_path'] == target_path:
+                return idx
+        return None
+
+    def patch_by_before_path(self, target_path):
+        # TODO: combine the patch_by_*_path methods into one
+        for idx, patch in enumerate(self):
+            if patch['before_path'] == target_path:
+                return idx
+        return None
+
+    # attempt to commute our own diff with another hunk that comes after us
+    # chronologically
+    # TODO: also implement this for a hunk coming before this patch
+    def commute_with_hunk_after(self, input_hunk, after_path):
+        # first, let's see if we even touch the input hunk's path
+        before_patch = self.patch_by_after_path(after_path)
+        if before_patch is None:
+            # if not, then we trivially commute with that hunk
+            return (True, self, input_hunk)
+        if self[before_patch]['before_path'] is None:
+            # this patch was the one that added that file, so commutation is
+            # impossible
+            return (False, self, input_hunk)
+        if 'binary_hunks' in self[before_patch]:
+            # if either side of a diff is binary, git will always show the
+            # entire diff as binary, and we consider binary hunks of any kind
+            # to be noncommutative with text
+            return (False, self, input_hunk)
+        # we will store the commuted version of the input hunk
+        # a hunk will never be changed by commuting with a hunk below it, so we
+        # only have to try with the topmost hunk in the patch - if that one is
+        # below the input hunk, then so are all the other hunks in the patch,
+        # and we know that the input hunk won't be changed by commutation with
+        # this patch at all
+        commuted_input_hunk = None
+        # we will attempt to commute every hunk in the patch with the input
+        commuted_before_hunks = []
+        # this list could be empty if the patch was binary, or if this was a
+        # new file, and we've ruled both those cases out
+        for before_hunk in self[before_patch]['text_hunks']:
+            does_commute, commuted_input, commuted_before = commute_two_hunks(before_hunk, input_hunk)
+            if not does_commute:
+                # this patch does not commute with the input hunk, so we bail
+                return (False, self, input_hunk)
+            if commuted_input_hunk is None:
+                # as mentioned above, we should only do this assignment once
+                commuted_input_hunk = commuted_input
+            commuted_before_hunks.append(commuted_before)
+        # TODO: what do we do with extended headers? especially index? should
+        # we just remove that header to indicate that the blob hashes are
+        # invalid?
+        ret = self.copy()
+        ret[before_patch] = ret[before_patch].copy()
+        ret[before_patch]['text_hunks'] = commuted_before_hunks
+        return (True, ret, commuted_input_hunk)
+
 def commute_two_hunks(first, second):
     # first we have to determine which hunk is above the other
     before_first_above_second = first['before']['start'] <= second['before']['start']
