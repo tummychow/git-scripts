@@ -35,10 +35,13 @@ def parse_helper_mode_header(mode):
 
 
 def parse_helper_quoted_filename(filename):
-    # git will quote a filename if it contains at least one of: tab, newline,
-    # quote or backslash
-    # it will quote the entire filename and then backslash-escape all of those
-    # characters
+    # git performs c-style quoting using a table (sq_lookup) in quote.c
+    # it supports the standard backslash escapes (a, b, f, n, r, t, v, ", \)
+    # as well as octal
+    # characters in the range [0x20, 0x80) are unescaped (besides backslash),
+    # characters below that range are always escaped (using c-style character
+    # if applicable, otherwise octal), and characters above that range are
+    # octal escaped (unless core.quotePath is false)
     # if a filename does not contain any of those, then git will print it
     # completely unquoted
     quotestart = filename.startswith(b'"')
@@ -49,22 +52,37 @@ def parse_helper_quoted_filename(filename):
         raise RuntimeError('{!r} is missing a quote'.format(filename))
     # this file is quoted, we should start by discarding those
     filename = filename[1:-1]
-    sindex = 0
-    backslash = filename.find(b'\\', sindex)
+    # iterate over backslashes and build up the unescaped filename
+    ret = bytearray()
+    idx = 0
+    backslash = filename.find(b'\\', idx)
     while backslash != -1:
-        escape_char = filename[backslash+1:backslash+2]
-        if escape_char == b'\\' or escape_char == b'"':
+        ret.extend(filename[idx:backslash])
+        idx = backslash + 1
+        escape_seq = bytearray(filename[idx:idx+1])
+        if escape_seq[0] in b'0123':
+            # consume up to two additional chars for octal escapes
+            while idx - backslash <= 3 and idx+1 < len(filename) and filename[idx+1] in b'01234567':
+                idx += 1
+                escape_seq.append(filename[idx])
+        # now that we've determined the escape sequence, unescape it
+        if escape_seq == b'\\' or escape_seq == b'"':
+            # these are already unescaped as is
             pass
-        elif escape_char == b'n':
-            escape_char = b'\n'
-        elif escape_char == b't':
-            escape_char = b'\t'
+        elif escape_seq in b'abfnrtv':
+            # TODO: there must be a way to do this without going bytearray->string->bytes
+            escape_seq[0:0] = b'\\'
+            escape_seq = escape_seq.decode('unicode_escape').encode('ascii')
+        elif escape_seq.isdigit():
+            # convert octal string to integer and make a byte of the result
+            # this will fail automatically for integers outside [0,256)
+            escape_seq = bytes([int(esc, base=8)])
         else:
-            raise RuntimeError('{!r} contains unrecognized escape {!r}'.format(filename, escape_char))
-        filename = filename[0:backslash] + escape_char + filename[backslash+2:]
-        sindex = backslash + 1
-        backslash = filename.find(b'\\', sindex)
-    return filename
+            raise RuntimeError('{!r} contains unrecognized escape {!r}'.format(filename, escape_seq))
+        ret.extend(escape_seq)
+        idx += 1
+        backslash = filename.find(b'\\', idx)
+    return ret
 
 
 def parse_helper_similarity(similarity_percent):
