@@ -357,14 +357,26 @@ class DiffList(list):
         # before (starting with a "-")
         # after (starting with a "+")
         # the lines must come in contiguous blocks of before, then after,
-        # with blocks of context lines possibly appearing between, and at the
-        # start/end
+        # with blocks of context lines appearing between, and optionally also
+        # at the start/end
         # in addition, git exposes a special line starting with a backslash,
         # "\ No newline at end of file", which indicates that the preceding
         # line did not have a newline terminator
-        # by its very nature, this line must come at the end of its block, and
-        # if the no-newline indicator is attached to a context block, then that
-        # line must itself be the end of the hunk
+        # we refer to this as an "NNEOF" (no-newline-end-of-file)
+        # by its very nature, an NNEOF must come at the end of its block, and
+        # if the NNEOF is attached to a context/after block, then that block
+        # must itself be the end of the entire patch
+        # if the NNEOF is attached to a before block, then it must be either
+        # the end of the entire patch, or followed by exactly one after block
+        # we use this set of line types to enforce what transitions are valid
+        # (note that we do not include '@' and 'd', because a hunk must contain
+        # at least one line)
+        permitted_line_types = {' ', '-', '+', '\\'}
+        # and for the special case of before-with-NNEOF-followed-by-after, we
+        # have this boolean flag
+        trailing_before_nneof = False
+        # we will also enforce that the hunk has the number of lines it claimed
+        # to have, using these counters
         before_seen = 0
         after_seen = 0
         for line in self.stream:
@@ -372,62 +384,39 @@ class DiffList(list):
                 raise RuntimeError('empty line found in text hunk')
             line_type = line[:1].decode('ascii')
             rest_of_line = line[1:]
-            if not blocks:
-                # the first line is never a no-newline indicator, so we don't
-                # have to worry about line_type being a backslash here
-                blocks.append({
-                    'type': line_type,
-                    'lines': [],
-                    'ending_newline': True,
-                })
-            current_type = blocks[-1]['type']
-            # no-newline indicator found for this block
-            # no-newline indicators do not count towards the hunk lines, so we
-            # do this part before checking line counts
-            # (for example, a no-newline indicator could be attached to the
-            # very last line in a hunk)
+            if line_type not in permitted_line_types:
+                raise RuntimeError('line {!r} has unexpected line type (expected one of {!r})'.format(line, permitted_line_types))
+            # no-newline indicators do not count towards the hunk's line count,
+            # so we have to check this before we do the line count check
             if line_type == '\\':
-                # if we already saw a no-newline indicator for this block, we
-                # can't have another one
-                if not blocks[-1]['ending_newline']:
-                    raise RuntimeError('two no-newline indicators found for current block {!r}'.format(blocks[-1]))
+                if rest_of_line != b' No newline at end of file':
+                    raise RuntimeError('got NNEOF {!r} with unexpected line content after backslash'.format(line))
                 blocks[-1]['ending_newline'] = False
+                # if a before block has an NNEOF, then it may be followed by
+                # one after block, or nothing
+                if blocks[-1]['type'] == '-':
+                    permitted_line_types = {'+', 'd'}
+                    trailing_before_nneof = True
+                # if a context or after block has an NNEOF, then nothing is
+                # permitted to follow it, it terminates the entire patch
+                else:
+                    permitted_line_types = {'d'}
                 continue
-            # if all the lines in the hunk are accounted for, then this is not
-            # a hunk line, so break out
+            # we validate the counters immediately after checking for NNEOF,
+            # and before updating the line counters
+            # this covers the case where NNEOF is the last line in the hunk and
+            # is then followed by a new diff - if we moved this condition
+            # anywhere else, then we would break out of the loop before
+            # consuming that NNEOF
             if before_seen > before['count'] or after_seen > after['count']:
                 raise RuntimeError('found more before/after lines than expected ({}>{} || {}>{})'.format(before_seen, before['count'], after_seen, after['count']))
             if before_seen == before['count'] and after_seen == after['count']:
+                # note that this is the only break in the entire loop, it has
+                # to stay that way
                 break
-            if not blocks[-1]['ending_newline']:
-                # by definition, a no-newline indicator terminates the block, so
-                # the line's type must not continue the block that was
-                # terminated
-                if line_type == current_type:
-                    raise RuntimeError('line {!r} continues a block that was terminated by a no-newline indicator'.format(line))
-                # in addition, a no-newline context block can't have anything
-                # after it, since it's the end of that file
-                if current_type == ' ':
-                    raise RuntimeError('a no-newline context block must terminate the hunk, but found line {!r}'.format(line))
-                # TODO: a no-newline before block can only be followed by a
-                # single after block and then the patch must terminate
-                # TODO: a no-newline after block cannot be followed by anything
-            # the previous block has ended and we need to start a new one
-            if line_type != current_type:
-                # context blocks can transition to before or after blocks, and
-                # before blocks can transition to context or after blocks
-                if current_type == '+':
-                    # however, we cannot go from an after block, back into a
-                    # before block
-                    # (this prevents cases of before->after->before->after)
-                    if line_type == '-':
-                        raise RuntimeError('transitioning from after block {!r} to before line {!r} is illegal'.format(blocks[-1], line))
-                blocks.append({
-                    'type': line_type,
-                    'lines': [],
-                    'ending_newline': True,
-                })
-            # keep track of the lines
+            # if we're still in the loop, then we can update counters
+            # if the counters are now maxed out, we'll still consume one more
+            # line (in case that line is an NNEOF)
             if line_type == ' ':
                 before_seen += 1
                 after_seen += 1
@@ -435,9 +424,32 @@ class DiffList(list):
                 before_seen += 1
             elif line_type == '+':
                 after_seen += 1
+            # now we can update the block list
+            # if this line continues a previous block, then add it to the block
+            if blocks and blocks[-1]['type'] == line_type:
+                blocks[-1]['lines'].append(rest_of_line)
+            # otherwise, create a new block with just this line, and set the
+            # appropriate continuing line types
             else:
-                raise RuntimeError('line {!r} unexpected in incomplete hunk'.format(line))
-            blocks[-1]['lines'].append(rest_of_line)
+                blocks.append({
+                    'type': line_type,
+                    'lines': [rest_of_line],
+                    'ending_newline': True,
+                })
+                # after blocks cannot transition to before blocks
+                # this prevents us from patches of before->after->before, which
+                # are invalid because the two before sections should be
+                # combined together
+                if line_type == '+':
+                    # if the preceding block was a before block with an NNEOF,
+                    # then this after block must be the last one in the patch
+                    if trailing_before_nneof:
+                        permitted_line_types = {'+', '\\', 'd'}
+                    else:
+                        permitted_line_types = {' ', '+', '\\', '@', 'd'}
+                # for other block types, anything is allowed
+                else:
+                    permitted_line_types = {' ', '-', '+', '\\', '@', 'd'}
         else:
             # we exhausted the input stream
             # we have to make sure we did parse this entire hunk before leaving
@@ -450,13 +462,10 @@ class DiffList(list):
         # non-context block in the hunk
         if all(map(lambda block: block['type'] == ' ', blocks)):
             raise RuntimeError('hunk consists entirely of context blocks {!r}'.format(blocks))
-        # there could be another hunk here
+        # there could be another hunk here (assuming the last block wasn't
+        # stopped by an NNEOF, but we already enforced that by excluding '@'
+        # from the set of permitted types)
         if line.startswith(b'@@'):
-            # unless the last hunk ended in a no-newline context block, in which
-            # case it represents the end of the entire file and no more hunks
-            # can come after it
-            # TODO: avoid repeating the conditions here that we already
-            # expressed earlier
             if blocks[-1]['type'] == ' ' and not blocks[-1]['ending_newline']:
                 raise RuntimeError('a no-newline context block must terminate the patch, but found new hunk header {!r}'.format(line))
             return self.parse_text_hunk, line
