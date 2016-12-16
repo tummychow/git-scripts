@@ -76,7 +76,7 @@ def parse_helper_quoted_filename(filename):
         elif escape_seq.isdigit():
             # convert octal string to integer and make a byte of the result
             # this will fail automatically for integers outside [0,256)
-            escape_seq = bytes([int(esc, base=8)])
+            escape_seq = bytes([int(escape_seq, base=8)])
         else:
             raise RuntimeError('{!r} contains unrecognized escape {!r}'.format(filename, escape_seq))
         ret.extend(escape_seq)
