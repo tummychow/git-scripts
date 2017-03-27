@@ -1,0 +1,167 @@
+#!/usr/bin/env ruby
+
+# get current branch
+#   git symbolic-ref HEAD
+#   refs/heads/master
+#
+# get this branch's upstream (see also git-parse-remote)
+#   git config --get branch.$branch.remote
+#   origin
+#   git config --get branch.$branch.pushRemote
+#   returns nonzero (if this was nonempty, it would override remote)
+#   git config --get branch.$branch.merge
+#   refs/heads/master
+#
+# get the remote's actual URL (ie what gh repo it is)
+#   git config --get remote.$remote.url
+#   https://github.com/stripe/veneur
+#   OR
+#   git@github.com:stripe/veneur
+#   OR
+#   ssh://git@github.com/stripe/veneur
+#
+# get info on this repository:
+#   curl https://api.github.com/repos/:owner/:repo
+#   the default_branch key shows the default branch for this repo
+#   the parent key shows the repo this was forked from
+#   the source key shows the root of the entire fork network
+#
+# you now know the target repo to open the PR against (the parent, or this repo
+# if there is none), the branch to merge into (default branch of that repo),
+# the repo to open from (the push remote of HEAD) and the branch to open from
+# (the remote tracking branch against HEAD)
+#
+# now you can check for the existence of the PR via this api request:
+#   curl https://api.github.com/repos/:owner/:repo/pulls?head=myuser:mybranch&base=targetbranch
+#   should return an array with either zero or one element
+#
+# if it has an element, you can use the html_url key to link to it
+#
+# otherwise you can open this url to actually create the PR:
+#   https://github.com/targetowner/targetrepo/compare/targetbranch...[fork,if any:]mybranch?expand=1
+# you need the ?expand=1 to actually open the PR form, otherwise you have to click "create pull request"
+# to open it manually
+
+# TODO: what if the target remote is configured in git, but it's already been deleted from github?
+# TODO: xdg-open support
+
+require 'open3'
+require 'shellwords'
+require 'uri'
+require 'net/http'
+require 'json'
+
+get_head = %W[git symbolic-ref HEAD]
+o, e, s = Open3.capture3(*get_head)
+abort("#{get_head.shelljoin} got #{s.exitstatus}:\n#{e}") unless s.exitstatus == 0
+abort("#{o.chomp} does not look like a branch name") unless o.start_with?('refs/heads/')
+HEAD = o.chomp.sub('refs/heads/', '')
+
+get_upstream_merge = %W[git config --get branch.#{HEAD}.merge]
+o, e, s = Open3.capture3(*get_upstream_merge)
+abort("#{get_upstream_merge.shelljoin} got #{s.exitstatus}:\n#{e}") unless s.exitstatus == 0
+abort("#{o.chomp} does not look like a branch name") unless o.start_with?('refs/heads/')
+UPSTREAM_BRANCH = o.chomp.sub('refs/heads/', '')
+
+get_upstream_push = %W[git config --get branch.#{HEAD}.pushRemote]
+o, e, s = Open3.capture3(*get_upstream_push)
+if s.exitstatus == 1
+  # pushRemote overrides remote, if present
+  # if not present, then it returns 1, and we fall back to remote
+  get_upstream_pull = %W[git config --get branch.#{HEAD}.remote]
+  o, e, s = Open3.capture3(*get_upstream_pull)
+  abort("#{get_upstream_pull.shelljoin} got #{s.exitstatus}:\n#{e}") unless s.exitstatus == 0
+elsif s.exitstatus != 0
+  abort("#{get_upstream_push.shelljoin} got #{s.exitstatus}:\n#{e}")
+end
+UPSTREAM_REMOTE = o.chomp
+
+get_remote_url = %W[git config --get remote.#{UPSTREAM_REMOTE}.url]
+o, e, s = Open3.capture3(*get_remote_url)
+abort("#{get_remote_url.shelljoin} got #{s.exitstatus}:\n#{e}") unless s.exitstatus == 0
+REMOTE_URL = o.chomp
+
+# see git-fetch for the format of repository URLs
+around_colon = REMOTE_URL.split(':', 2)
+abort("#{REMOTE_URL.dump} does not contain a colon, cannot be parsed") unless around_colon.length == 2
+if around_colon.last.start_with?('//')
+  remote_uri = URI::parse(REMOTE_URL)
+  # either the URI has an https://github.com/... or an ssh://git@github.com/... form
+  unless (remote_uri.scheme == 'https' && remote_uri.host == 'github.com') ||
+         (remote_uri.scheme == 'ssh' && remote_uri.user == 'git' && remote_uri.host == 'github.com')
+    abort("#{REMOTE_URL.dump} does not point to https://github.com or ssh://git@github.com")
+  end
+  abort("#{REMOTE_URL.dump} path was parsed incorrectly to #{remote_uri.path}") unless remote_uri.path.start_with?('/')
+  path_segments = remote_uri.path.sub('/', '').split('/')
+else
+  # this remote is using the scp-like syntax "git@github.com:user/repo"
+  # we can tell because, if it had a scheme, then there would have been a //
+  # after the colon
+  abort("#{REMOTE_URL.dump} does not point to git@github.com") unless around_colon.first == 'git@github.com'
+  path_segments = around_colon.last.split('/')
+end
+abort("#{REMOTE_URL.dump} must have exactly 2 path segments, instead got:\n#{path_segments.join("\n")}") unless path_segments.length == 2
+GITHUB_REMOTE_USER = path_segments.first
+GITHUB_REMOTE_REPO = path_segments.last.chomp('.git')
+
+puts "#{HEAD} has upstream #{UPSTREAM_REMOTE}/#{UPSTREAM_BRANCH} corresponding to URL #{REMOTE_URL.dump} and github repo #{GITHUB_REMOTE_USER}/#{GITHUB_REMOTE_REPO}"
+
+GITHUB_HOST = 'api.github.com'
+GITHUB_PORT = URI::HTTPS::DEFAULT_PORT
+# TOOD: token should be optional, and is there a better place to put it?
+GITHUB_OAUTH_TOKEN = IO.read("#{ENV.fetch('HOME')}/.github-oauth-token").chomp
+
+Net::HTTP.start(GITHUB_HOST, GITHUB_PORT, :use_ssl => true) do |http|
+  http.request(Net::HTTP::Get.new(URI::HTTPS.build({
+    host: GITHUB_HOST,
+    port: GITHUB_PORT,
+    path: "/repos/#{GITHUB_REMOTE_USER}/#{GITHUB_REMOTE_REPO}",
+  }), {
+    'Accept' => 'application/vnd.github.v3+json',
+    'Authorization' => "token #{GITHUB_OAUTH_TOKEN}",
+  })) do |resp|
+    abort("#{resp.uri.to_s.dump} got #{resp.code} with body:\n#{resp.body}") unless resp.is_a?(Net::HTTPOK)
+    body = JSON.parse(resp.body)
+    # if this is a fork, then get the repo object corresponding to the parent
+    # otherwise just keep this repo object
+    repo = body['fork'] ? body['parent'] : body
+    GITHUB_FORK_USER = repo['owner']['login']
+    GITHUB_FORK_REPO = repo['name']
+    GITHUB_FORK_DEFAULT_BRANCH = repo['default_branch']
+  end
+
+  puts "PR for #{GITHUB_REMOTE_USER}/#{GITHUB_REMOTE_REPO} #{UPSTREAM_BRANCH} into #{GITHUB_FORK_USER}/#{GITHUB_FORK_REPO} #{GITHUB_FORK_DEFAULT_BRANCH}"
+  if GITHUB_FORK_USER == GITHUB_REMOTE_USER && GITHUB_FORK_REPO == GITHUB_REMOTE_REPO && GITHUB_FORK_DEFAULT_BRANCH == UPSTREAM_BRANCH
+    abort("Branches are identical, aborting")
+  end
+
+  http.request(Net::HTTP::Get.new(URI::HTTPS.build({
+    host: GITHUB_HOST,
+    port: GITHUB_PORT,
+    path: "/repos/#{GITHUB_FORK_USER}/#{GITHUB_FORK_REPO}/pulls",
+    query: URI.encode_www_form({
+      base: GITHUB_FORK_DEFAULT_BRANCH,
+      head: "#{GITHUB_REMOTE_USER}:#{UPSTREAM_BRANCH}",
+    }),
+  }), {
+    'Accept' => 'application/vnd.github.v3+json',
+    'Authorization' => "token #{GITHUB_OAUTH_TOKEN}",
+  })) do |resp|
+    abort("#{resp.uri.to_s.dump} got #{resp.code} with body:\n#{resp.body}") unless resp.is_a?(Net::HTTPOK)
+    body = JSON.parse(resp.body)
+    pulls = body.map { |pull| pull['html_url'] }
+
+    case pulls.length
+    when 0 then
+      # https://github.com/targetowner/targetrepo/compare/targetbranch...[fork,if any:]mybranch?expand=1
+      PR_URL = "https://github.com/#{GITHUB_FORK_USER}/#{GITHUB_FORK_REPO}/compare/#{GITHUB_FORK_DEFAULT_BRANCH}...#{GITHUB_FORK_USER == GITHUB_REMOTE_USER ? '' : GITHUB_REMOTE_USER + ':'}#{UPSTREAM_BRANCH}?expand=1"
+    when 1 then
+      PR_URL = pulls.first
+    else
+      abort("Found multiple matching PRs on #{GITHUB_FORK_USER}/#{GITHUB_FORK_REPO}:\n#{pulls.join("\n")}")
+    end
+
+    puts "Opening #{PR_URL.dump}"
+    exec(*%W[open #{PR_URL}])
+  end
+end
