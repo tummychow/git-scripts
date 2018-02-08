@@ -2,7 +2,7 @@
 
 https://groups.google.com/forum/#!msg/mozilla.dev.version-control/nh4fITFlEMk/ZNXgnAzxAQAJ
 
-https://bitbucket.org/facebook/hg-experimental/src/1dc3b9cd4c1d24c8022c069c376a23a4e8aad398/hgext3rd/absorb.py
+https://bitbucket.org/facebook/hg-experimental/src/default/hgext3rd/absorb/__init__.py?at=default&fileviewer=file-view-default
 
 the absorb command takes the following flags:
 
